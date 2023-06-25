@@ -20,11 +20,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
-
 // KwokctlConfiguration provides configuration for the Kwokctl.
 type KwokctlConfiguration struct {
-	metav1.TypeMeta
 	// Standard list metadata.
 	// More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata
 	metav1.ObjectMeta
@@ -32,15 +29,48 @@ type KwokctlConfiguration struct {
 	Options KwokctlConfigurationOptions
 	// Components holds information about the components.
 	Components []Component
+	// ComponentsPatches holds information about the components patches.
+	ComponentsPatches []ComponentPatches
+	// Status holds information about the status.
+	Status KwokctlConfigurationStatus
 }
 
-type KwokctlConfigurationOptions struct {
+// KwokctlConfigurationStatus holds information about the status.
+type KwokctlConfigurationStatus struct {
+	// Version is the version of the kwokctl.
+	Version string
+}
 
+// ExtraArgs holds information about the extra args.
+type ExtraArgs struct {
+	// Key is the key of the extra args.
+	Key string
+	// Value is the value of the extra args.
+	Value string
+}
+
+// ComponentPatches holds information about the component patches.
+type ComponentPatches struct {
+	// Name is the name of the component.
+	Name string
+	// ExtraArgs is the extra args to be patched on the component.
+	ExtraArgs []ExtraArgs
+	// ExtraVolumes is the extra volumes to be patched on the component.
+	ExtraVolumes []Volume
+}
+
+// KwokctlConfigurationOptions holds information about the options.
+type KwokctlConfigurationOptions struct {
 	// KubeApiserverPort is the port to expose apiserver.
 	KubeApiserverPort uint32
 
 	// Runtime is the runtime to use.
 	Runtime string
+
+	// Runtimes is a list of alternate runtimes. When Runtime is empty,
+	// the availability of the runtimes in the list is checked one by one
+	// and set to Runtime
+	Runtimes []string
 
 	// PrometheusPort is the port to expose Prometheus metrics.
 	PrometheusPort uint32
@@ -64,6 +94,7 @@ type KwokctlConfigurationOptions struct {
 	KindVersion string
 
 	// SecurePort is the apiserver port on which to serve HTTPS with authentication and authorization.
+	// is not available before Kubernetes 1.13.0
 	SecurePort bool
 
 	// QuietPull is the flag to quiet the pull.
@@ -151,6 +182,9 @@ type KwokctlConfigurationOptions struct {
 	// KubeAuthorization is the flag to enable authorization on secure port.
 	KubeAuthorization bool
 
+	// KubeAdmission is the flag to enable admission for kube-apiserver.
+	KubeAdmission bool
+
 	// EtcdPeerPort is etcd peer port in the binary runtime
 	EtcdPeerPort uint32
 
@@ -163,13 +197,35 @@ type KwokctlConfigurationOptions struct {
 	// KubeSchedulerPort is kube-scheduler port in the binary runtime
 	KubeSchedulerPort uint32
 
-	// KwokControllerPort is kube-controller port in the binary runtime
+	// KwokControllerPort is kwok-controller port that is exposed to the host.
 	KwokControllerPort uint32
 
 	// CacheDir is the directory of the cache.
 	CacheDir string
+
+	// KubeControllerManagerNodeMonitorPeriodMilliseconds is --node-monitor-period for kube-controller-manager.
+	KubeControllerManagerNodeMonitorPeriodMilliseconds int64
+
+	// KubeControllerManagerNodeMonitorGracePeriodMilliseconds is --node-monitor-grace-period for kube-controller-manager.
+	KubeControllerManagerNodeMonitorGracePeriodMilliseconds int64
+
+	// NodeStatusUpdateFrequencyMilliseconds is --node-status-update-frequency for kwok like kubelet.
+	NodeStatusUpdateFrequencyMilliseconds int64
+
+	// NodeLeaseDurationSeconds is the duration the Kubelet will set on its corresponding Lease.
+	NodeLeaseDurationSeconds uint
+
+	// BindAddress is the address to bind to.
+	BindAddress string
+
+	// KubeApiserverCertSANs sets extra Subject Alternative Names for the API Server signing cert.
+	KubeApiserverCertSANs []string
+
+	// DisableQPSLimits specifies whether to disable QPS limits for components.
+	DisableQPSLimits bool
 }
 
+// Component is a component of the cluster.
 type Component struct {
 	// Name of the component specified as a DNS_LABEL.
 	// Each component must have a unique name (DNS_LABEL).
@@ -231,7 +287,6 @@ type Port struct {
 }
 
 // Protocol defines network protocols supported for things like component ports.
-// +enum
 type Protocol string
 
 const (
@@ -243,6 +298,7 @@ const (
 	ProtocolSCTP Protocol = "SCTP"
 )
 
+// Volume represents a volume that is accessible to the containers running in a component.
 type Volume struct {
 	// Name of the volume specified.
 	Name string
@@ -252,4 +308,31 @@ type Volume struct {
 	HostPath string
 	// MountPath within the container at which the volume should be mounted.
 	MountPath string
+	// PathType is the type of the HostPath.
+	PathType HostPathType
 }
+
+// HostPathType represents the type of storage used for HostPath volumes.
+type HostPathType string
+
+// Constants for HostPathType.
+const (
+	// For backwards compatible, leave it empty if unset
+	HostPathUnset HostPathType = ""
+	// If nothing exists at the given path, an empty directory will be created there
+	// as needed with file mode 0755, having the same group and ownership with Kubelet.
+	HostPathDirectoryOrCreate HostPathType = "DirectoryOrCreate"
+	// A directory must exist at the given path
+	HostPathDirectory HostPathType = "Directory"
+	// If nothing exists at the given path, an empty file will be created there
+	// as needed with file mode 0644, having the same group and ownership with Kubelet.
+	HostPathFileOrCreate HostPathType = "FileOrCreate"
+	// A file must exist at the given path
+	HostPathFile HostPathType = "File"
+	// A UNIX socket must exist at the given path
+	HostPathSocket HostPathType = "Socket"
+	// A character device must exist at the given path
+	HostPathCharDev HostPathType = "CharDevice"
+	// A block device must exist at the given path
+	HostPathBlockDev HostPathType = "BlockDevice"
+)

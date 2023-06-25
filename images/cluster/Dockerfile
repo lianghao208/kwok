@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-FROM --platform=$TARGETPLATFORM docker.io/library/alpine:3.17 AS cache
+FROM --platform=$TARGETPLATFORM docker.io/library/alpine:3.18 AS cache
 ARG TARGETPLATFORM
 COPY --chmod=0755 bin/$TARGETPLATFORM/kwok /usr/local/bin/
 COPY --chmod=0755 bin/$TARGETPLATFORM/kwokctl /usr/local/bin/
@@ -23,7 +23,6 @@ ENV KWOK_KUBE_APISERVER_PORT 8080
 ARG kube_version
 ENV KWOK_KUBE_VERSION $kube_version
 
-ENV KWOK_RUNTIME binary
 ENV KWOK_QUIET_PULL true
 
 RUN echo "KUBE_VERSION: ${KWOK_KUBE_VERSION}" && \
@@ -31,7 +30,7 @@ RUN echo "KUBE_VERSION: ${KWOK_KUBE_VERSION}" && \
     kwokctl kubectl version && \
     kwokctl delete cluster
 
-FROM --platform=$TARGETPLATFORM docker.io/library/alpine:3.17
+FROM --platform=$TARGETPLATFORM docker.io/library/alpine:3.18
 ARG TARGETPLATFORM
 
 # Cache dependent binaries as the first layer
@@ -45,7 +44,5 @@ ENV KWOK_KUBE_APISERVER_PORT 8080
 
 ARG kube_version
 ENV KWOK_KUBE_VERSION $kube_version
-
-ENV KWOK_RUNTIME binary
 
 ENTRYPOINT ["/entrypoint.sh"]

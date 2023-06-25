@@ -9,6 +9,7 @@ spec:
   containers:
   - args:
     - --config=/etc/kwok/kwok.yaml
+    - --v={{ .Verbosity }}
     - --manage-all-nodes=false
     - --manage-nodes-with-annotation-selector=kwok.x-k8s.io/node=fake
     - --manage-nodes-with-label-selector=
@@ -20,6 +21,10 @@ spec:
     - --node-ip=$(POD_IP)
     - --node-name=kwok-controller.kube-system.svc
     - --node-port=10247
+    - --node-lease-duration-seconds={{ .NodeLeaseDurationSeconds }}
+    {{ range .ExtraArgs }}
+    - --{{ .Key }}={{ .Value }}
+    {{ end }}
     env:
     - name: POD_IP
       valueFrom:
@@ -56,6 +61,11 @@ spec:
     - mountPath: /etc/kubernetes/pki
       name: k8s-certs
       readOnly: true
+    {{ range .ExtraVolumes }}
+    - mountPath: {{ .MountPath }}
+      name: {{ .Name }}
+      readOnly: {{ .ReadOnly }}
+    {{ end }}
   hostNetwork: true
   restartPolicy: Always
   volumes:
@@ -71,3 +81,9 @@ spec:
       path: /etc/kubernetes/pki
       type: DirectoryOrCreate
     name: k8s-certs
+  {{ range .ExtraVolumes }}
+  - hostPath:
+      path: /var/components/controller{{ .MountPath }}
+      type: {{ .PathType }}
+    name: {{ .Name }}
+  {{ end }}

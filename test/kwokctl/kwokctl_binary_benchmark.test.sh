@@ -21,10 +21,11 @@ source "${DIR}/helper.sh"
 
 function main() {
   local all_releases=("${@}")
-  build_kwokctl
-  build_kwok
 
   test_all "binary" "benchmark" "${all_releases[@]}" || exit 1
 }
 
-main $(supported_releases)
+requirements_for_binary
+
+mapfile -t releases < <(supported_releases)
+main "${releases[@]}"

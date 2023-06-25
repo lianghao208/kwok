@@ -25,26 +25,29 @@ import (
 	"time"
 
 	"github.com/nxadm/tail"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/wait"
 
 	"sigs.k8s.io/kwok/pkg/apis/internalversion"
 	"sigs.k8s.io/kwok/pkg/config"
 	"sigs.k8s.io/kwok/pkg/consts"
+	"sigs.k8s.io/kwok/pkg/kwok/controllers"
 	"sigs.k8s.io/kwok/pkg/log"
 	"sigs.k8s.io/kwok/pkg/utils/exec"
 	"sigs.k8s.io/kwok/pkg/utils/file"
+	"sigs.k8s.io/kwok/pkg/utils/format"
 	"sigs.k8s.io/kwok/pkg/utils/path"
 	"sigs.k8s.io/kwok/pkg/utils/slices"
+	"sigs.k8s.io/kwok/pkg/utils/version"
+	"sigs.k8s.io/kwok/pkg/utils/wait"
+	"sigs.k8s.io/kwok/stages"
 )
 
+// The following functions are used to get the path of the cluster
 var (
 	ConfigName              = consts.ConfigName
 	InHostKubeconfigName    = "kubeconfig.yaml"
 	InClusterKubeconfigName = "kubeconfig"
 	EtcdDataDirName         = "etcd"
 	PkiName                 = "pki"
-	ComposeName             = "docker-compose.yaml"
 	Prometheus              = "prometheus.yaml"
 	KindName                = "kind.yaml"
 	KwokPod                 = "kwok-controller-pod.yaml"
@@ -52,14 +55,20 @@ var (
 	AuditPolicyName         = "audit.yaml"
 	AuditLogName            = "audit.log"
 	SchedulerConfigName     = "scheduler.yaml"
+
+	// ComposeName is the default name of the docker-compose file
+	// Deprecated: *-compose will be removed in the future
+	ComposeName = "docker-compose.yaml"
 )
 
+// Cluster is the cluster
 type Cluster struct {
 	workdir string
 	name    string
 	conf    *internalversion.KwokctlConfiguration
 }
 
+// NewCluster creates a new cluster
 func NewCluster(name, workdir string) *Cluster {
 	return &Cluster{
 		name:    name,
@@ -67,6 +76,7 @@ func NewCluster(name, workdir string) *Cluster {
 	}
 }
 
+// Config returns the cluster config
 func (c *Cluster) Config(ctx context.Context) (*internalversion.KwokctlConfiguration, error) {
 	if c.conf != nil {
 		return c.conf, nil
@@ -76,17 +86,53 @@ func (c *Cluster) Config(ctx context.Context) (*internalversion.KwokctlConfigura
 		return conf, err
 	}
 	c.conf = conf
+	logger := log.FromContext(ctx)
+	if conf.Status.Version == "" {
+		logger.Warn("The cluster was created by an older version of kwokctl, "+
+			"please recreate the cluster",
+			"createdByVersion", "<0.3.0",
+			"kwokctlVersion", consts.Version,
+		)
+		conf.Status.Version = "0.0.0"
+	} else if conf.Status.Version != consts.Version {
+		currentVer, err := version.ParseVersion(conf.Status.Version)
+		if err != nil {
+			return nil, err
+		}
+		ver, err := version.ParseVersion(consts.Version)
+		if err != nil {
+			return nil, err
+		}
+		switch {
+		case currentVer.LT(ver):
+			logger.Warn("The cluster was created by a older version of kwokctl, "+
+				"please recreate the cluster",
+				"createdByVersion", conf.Status.Version,
+				"kwokctlVersion", consts.Version,
+			)
+		case currentVer.GT(ver):
+			logger.Warn("The cluster was created by a newer version of kwokctl, "+
+				"please upgrade kwokctl or recreate the cluster",
+				"createdByVersion", conf.Status.Version,
+				"kwokctlVersion", consts.Version,
+			)
+		}
+	}
+
 	return conf, nil
 }
 
+// Name returns the cluster name
 func (c *Cluster) Name() string {
 	return c.name
 }
 
+// Workdir returns the cluster workdir
 func (c *Cluster) Workdir() string {
 	return c.workdir
 }
 
+// Load loads the cluster config
 func (c *Cluster) Load(ctx context.Context) (*internalversion.KwokctlConfiguration, error) {
 	objs, err := config.Load(ctx, c.GetWorkdirPath(ConfigName))
 	if err != nil {
@@ -100,35 +146,64 @@ func (c *Cluster) Load(ctx context.Context) (*internalversion.KwokctlConfigurati
 	return configs[0], nil
 }
 
-func (c *Cluster) InHostKubeconfig() (string, error) {
-	return c.GetWorkdirPath(InHostKubeconfigName), nil
-}
-
+// SetConfig sets the cluster config
 func (c *Cluster) SetConfig(ctx context.Context, conf *internalversion.KwokctlConfiguration) error {
 	c.conf = conf
 	return nil
 }
 
+// Save saves the cluster config
 func (c *Cluster) Save(ctx context.Context) error {
 	if c.conf == nil {
 		return nil
 	}
 
-	objs := []metav1.Object{
-		c.conf,
+	conf := c.conf.DeepCopy()
+	objs := []config.InternalObject{
+		conf,
+	}
+
+	if conf.Status.Version == "" {
+		c.conf = c.conf.DeepCopy()
+		c.conf.Status.Version = consts.Version
 	}
 
 	others := config.FilterWithoutTypeFromContext[*internalversion.KwokctlConfiguration](ctx)
-	if len(others) != 0 {
-		objs = append(objs, others...)
+	objs = append(objs, others...)
+
+	if conf.Options.NodeLeaseDurationSeconds == 0 {
+		if updateFrequency := conf.Options.NodeStatusUpdateFrequencyMilliseconds; updateFrequency > 0 &&
+			conf.Options.Runtime != consts.RuntimeTypeKind &&
+			conf.Options.Runtime != consts.RuntimeTypeKindPodman &&
+			len(config.FilterWithTypeFromContext[*internalversion.Stage](ctx)) == 0 {
+			nodeStages, err := controllers.NewStagesFromYaml([]byte(stages.DefaultNodeStages))
+			if err != nil {
+				return err
+			}
+			for _, stage := range nodeStages {
+				objs = append(objs, stage)
+			}
+
+			nodeHeartbeatStages, err := controllers.NewStagesFromYaml([]byte(stages.DefaultNodeHeartbeatStages))
+			if err != nil {
+				return err
+			}
+			hasUpdate := false
+			for _, stage := range nodeHeartbeatStages {
+				if stage.Name == "node-heartbeat" {
+					stage.Spec.Delay.DurationMilliseconds = format.Ptr(updateFrequency)
+					stage.Spec.Delay.JitterDurationMilliseconds = format.Ptr(updateFrequency + updateFrequency/10)
+					hasUpdate = true
+				}
+				objs = append(objs, stage)
+			}
+			if !hasUpdate {
+				return fmt.Errorf("failed to update node heartbeat stage")
+			}
+		}
 	}
 
-	err := config.Save(ctx, c.GetWorkdirPath(ConfigName), objs)
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return config.Save(ctx, c.GetWorkdirPath(ConfigName), objs)
 }
 
 func (c *Cluster) kubectlPath(ctx context.Context) (string, error) {
@@ -141,7 +216,7 @@ func (c *Cluster) kubectlPath(ctx context.Context) (string, error) {
 	kubectlPath, err := exec.LookPath("kubectl")
 	if err != nil {
 		kubectlPath = c.GetBinPath("kubectl" + conf.BinSuffix)
-		err = file.DownloadWithCache(ctx, conf.CacheDir, conf.KubectlBinary, kubectlPath, 0755, conf.QuietPull)
+		err = file.DownloadWithCache(ctx, conf.CacheDir, conf.KubectlBinary, kubectlPath, 0750, conf.QuietPull)
 		if err != nil {
 			return "", err
 		}
@@ -149,25 +224,22 @@ func (c *Cluster) kubectlPath(ctx context.Context) (string, error) {
 	return kubectlPath, nil
 }
 
+// Install installs the cluster
 func (c *Cluster) Install(ctx context.Context) error {
 	_, err := c.kubectlPath(ctx)
-	if err != nil {
-		return err
-	}
-	return nil
+	return err
 }
 
+// Uninstall uninstalls the cluster.
 func (c *Cluster) Uninstall(ctx context.Context) error {
 	// cleanup workdir
 	return os.RemoveAll(c.Workdir())
 }
 
+// Ready returns true if the cluster is ready
 func (c *Cluster) Ready(ctx context.Context) (bool, error) {
 	out := bytes.NewBuffer(nil)
-	err := c.KubectlInCluster(ctx, exec.IOStreams{
-		Out:    out,
-		ErrOut: out,
-	}, "get", "--raw", "/healthz")
+	err := c.KubectlInCluster(exec.WithAllWriteTo(ctx, out), "get", "--raw", "/healthz")
 	if err != nil {
 		return false, err
 	}
@@ -182,6 +254,7 @@ func (c *Cluster) Ready(ctx context.Context) (bool, error) {
 	return true, nil
 }
 
+// WaitReady waits for the cluster to be ready.
 func (c *Cluster) WaitReady(ctx context.Context, timeout time.Duration) error {
 	var (
 		err     error
@@ -189,7 +262,7 @@ func (c *Cluster) WaitReady(ctx context.Context, timeout time.Duration) error {
 		ready   bool
 	)
 	logger := log.FromContext(ctx)
-	waitErr = wait.PollImmediateWithContext(ctx, time.Second, timeout, func(ctx context.Context) (bool, error) {
+	waitErr = wait.Poll(ctx, func(ctx context.Context) (bool, error) {
 		ready, err = c.Ready(ctx)
 		if err != nil {
 			logger.Debug("Cluster is not ready",
@@ -197,7 +270,7 @@ func (c *Cluster) WaitReady(ctx context.Context, timeout time.Duration) error {
 			)
 		}
 		return ready, nil
-	})
+	}, wait.WithTimeout(timeout), wait.WithImmediate())
 	if err != nil {
 		return err
 	}
@@ -207,6 +280,7 @@ func (c *Cluster) WaitReady(ctx context.Context, timeout time.Duration) error {
 	return nil
 }
 
+// GetComponent returns the component by name
 func (c *Cluster) GetComponent(ctx context.Context, name string) (internalversion.Component, error) {
 	config, err := c.Config(ctx)
 	if err != nil {
@@ -222,25 +296,27 @@ func (c *Cluster) GetComponent(ctx context.Context, name string) (internalversio
 	return component, nil
 }
 
-func (c *Cluster) Kubectl(ctx context.Context, stm exec.IOStreams, args ...string) error {
+// Kubectl runs kubectl.
+func (c *Cluster) Kubectl(ctx context.Context, args ...string) error {
 	kubectlPath, err := c.kubectlPath(ctx)
 	if err != nil {
 		return err
 	}
 
-	return exec.Exec(ctx, "", stm, kubectlPath, args...)
+	return exec.Exec(ctx, kubectlPath, args...)
 }
 
-func (c *Cluster) KubectlInCluster(ctx context.Context, stm exec.IOStreams, args ...string) error {
+// KubectlInCluster runs kubectl in the cluster.
+func (c *Cluster) KubectlInCluster(ctx context.Context, args ...string) error {
 	kubectlPath, err := c.kubectlPath(ctx)
 	if err != nil {
 		return err
 	}
 
-	return exec.Exec(ctx, "", stm, kubectlPath,
-		append([]string{"--kubeconfig", c.GetWorkdirPath(InHostKubeconfigName)}, args...)...)
+	return exec.Exec(ctx, kubectlPath, append([]string{"--kubeconfig", c.GetWorkdirPath(InHostKubeconfigName)}, args...)...)
 }
 
+// AuditLogs returns the audit logs of the cluster.
 func (c *Cluster) AuditLogs(ctx context.Context, out io.Writer) error {
 	logs := c.GetLogPath(AuditLogName)
 
@@ -257,12 +333,10 @@ func (c *Cluster) AuditLogs(ctx context.Context, out io.Writer) error {
 	}()
 
 	_, err = io.Copy(out, f)
-	if err != nil {
-		return err
-	}
-	return nil
+	return err
 }
 
+// AuditLogsFollow follows the audit logs of the cluster.
 func (c *Cluster) AuditLogsFollow(ctx context.Context, out io.Writer) error {
 	logs := c.GetLogPath(AuditLogName)
 
@@ -290,14 +364,43 @@ func (c *Cluster) AuditLogsFollow(ctx context.Context, out io.Writer) error {
 	return nil
 }
 
+// GetWorkdirPath returns the path to the file in the workdir.
 func (c *Cluster) GetWorkdirPath(name string) string {
 	return path.Join(c.workdir, name)
 }
 
+// GetBinPath returns the path to the given binary name.
 func (c *Cluster) GetBinPath(name string) string {
 	return path.Join(c.workdir, "bin", name)
 }
 
+// GetLogPath returns the path of the given log name.
 func (c *Cluster) GetLogPath(name string) string {
 	return path.Join(c.workdir, "logs", name)
+}
+
+func (c *Cluster) etcdctlPath(ctx context.Context) (string, error) {
+	config, err := c.Config(ctx)
+	if err != nil {
+		return "", err
+	}
+	conf := &config.Options
+	etcdctlPath := c.GetBinPath("etcdctl" + conf.BinSuffix)
+	err = file.DownloadWithCacheAndExtract(ctx, conf.CacheDir, conf.EtcdBinaryTar, etcdctlPath, "etcdctl"+conf.BinSuffix, 0750, conf.QuietPull, true)
+	if err != nil {
+		return "", err
+	}
+	return etcdctlPath, nil
+}
+
+// Etcdctl runs etcdctl.
+func (c *Cluster) Etcdctl(ctx context.Context, args ...string) error {
+	etcdctlPath, err := c.etcdctlPath(ctx)
+	if err != nil {
+		return err
+	}
+
+	// If using versions earlier than v3.4, set `ETCDCTL_API=3` to use v3 API.
+	ctx = exec.WithEnv(ctx, []string{"ETCDCTL_API=3"})
+	return exec.Exec(ctx, etcdctlPath, args...)
 }

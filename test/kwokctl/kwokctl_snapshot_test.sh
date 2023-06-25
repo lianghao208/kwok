@@ -17,6 +17,8 @@ DIR="$(dirname "${BASH_SOURCE[0]}")"
 
 DIR="$(realpath "${DIR}")"
 
+source "${DIR}/suite.sh"
+
 RELEASES=()
 
 function usage() {
@@ -35,32 +37,14 @@ function args() {
   done
 }
 
-function test_create_cluster() {
-  local release="${1}"
-  local name="${2}"
-
-  KWOK_KUBE_VERSION="${release}" kwokctl -v=-4 create cluster --name "${name}" --timeout 10m --wait 10m --quiet-pull
-  if [[ $? -ne 0 ]]; then
-    echo "Error: Cluster ${name} creation failed"
-    exit 1
-  fi
-}
-
-function test_delete_cluster() {
-  local release="${1}"
-  local name="${2}"
-  kwokctl delete cluster --name "${name}"
-}
-
 function get_snapshot_info() {
   local name="${1}"
-  kwokctl --name "${name}" kubectl get pod | awk '{print $1, $2}'
+  kwokctl --name "${name}" kubectl get pod | awk '{print $1}'
   kwokctl --name "${name}" kubectl get node | awk '{print $1}'
 }
 
-function test_snapshot() {
-  local release="${1}"
-  local name="${2}"
+function test_snapshot_etcd() {
+  local name="${1}"
   local empty_info
   local full_info
   local restore_empty_info
@@ -70,14 +54,14 @@ function test_snapshot() {
 
   empty_info="$(get_snapshot_info "${name}")"
 
-  kwokctl snapshot save --name "${name}" --path "${empty_path}"
+  kwokctl snapshot save --name "${name}" --path "${empty_path}" --format etcd
 
-  for ((i = 0; i < 30; i++)); do
+  for ((i = 0; i < 120; i++)); do
     kubectl kustomize "${DIR}" | kwokctl --name "${name}" kubectl apply -f - && break
     sleep 1
   done
 
-  for ((i = 0; i < 30; i++)); do
+  for ((i = 0; i < 120; i++)); do
     full_info="$(get_snapshot_info "${name}")"
     if [[ "${full_info}" != "${empty_info}" && "${full_info}" =~ "default pod/" ]]; then
       break
@@ -90,11 +74,11 @@ function test_snapshot() {
     return 1
   fi
 
-  kwokctl snapshot save --name "${name}" --path "${full_path}"
+  kwokctl snapshot save --name "${name}" --path "${full_path}" --format etcd
 
   sleep 1
-  kwokctl snapshot restore --name "${name}" --path "${empty_path}"
-  for ((i = 0; i < 30; i++)); do
+  kwokctl snapshot restore --name "${name}" --path "${empty_path}" --format etcd
+  for ((i = 0; i < 120; i++)); do
     restore_empty_info="$(get_snapshot_info "${name}")"
     if [[ "${empty_info}" == "${restore_empty_info}" ]]; then
       break
@@ -111,8 +95,8 @@ function test_snapshot() {
 
   sleep 1
 
-  kwokctl snapshot restore --name "${name}" --path "${full_path}"
-  for ((i = 0; i < 30; i++)); do
+  kwokctl snapshot restore --name "${name}" --path "${full_path}" --format etcd
+  for ((i = 0; i < 120; i++)); do
     restore_full_info=$(get_snapshot_info "${name}")
     if [[ "${full_info}" == "${restore_full_info}" ]]; then
       break
@@ -130,15 +114,73 @@ function test_snapshot() {
   rm -rf "${empty_path}" "${full_path}"
 }
 
+function test_snapshot_k8s() {
+  local name="${1}"
+  local full_info
+  local restore_full_info
+  local full_path="./snapshot-k8s-${name}"
+
+  for ((i = 0; i < 120; i++)); do
+    kubectl kustomize "${DIR}" | kwokctl --name "${name}" kubectl apply -f - && break
+    sleep 1
+  done
+
+  for ((i = 0; i < 120; i++)); do
+    full_info="$(get_snapshot_info "${name}")"
+    if [[ "${full_info}" =~ "default pod/" ]]; then
+      break
+    fi
+    sleep 1
+  done
+
+  kwokctl snapshot save --name "${name}" --path "${full_path}" --format k8s
+
+  for ((i = 0; i < 120; i++)); do
+    kubectl kustomize "${DIR}" | kwokctl --name "${name}" kubectl delete -f - && break
+    sleep 1
+  done
+
+  for ((i = 0; i < 120; i++)); do
+    restore_full_info="$(get_snapshot_info "${name}")"
+    if [[ ! "${restore_full_info}" =~ "default pod/" ]]; then
+      break
+    fi
+    sleep 1
+  done
+
+  kwokctl snapshot restore --name "${name}" --path "${full_path}" --format k8s
+
+  for ((i = 0; i < 120; i++)); do
+    restore_full_info="$(get_snapshot_info "${name}")"
+    if [[ "${restore_full_info}" =~ "default pod/" ]]; then
+      break
+    fi
+    sleep 1
+  done
+
+  if [[ "${full_info}" != "${restore_full_info}" ]]; then
+    echo "Error: Full snapshot restore failed"
+    echo "Expected: ${full_info}"
+    echo "Actual: ${restore_full_info}"
+    return 1
+  fi
+
+  rm -rf "${full_path}"
+}
+
 function main() {
   local failed=()
   for release in "${RELEASES[@]}"; do
     echo "------------------------------"
     echo "Testing snapshot on ${KWOK_RUNTIME} for ${release}"
     name="snapshot-cluster-${KWOK_RUNTIME}-${release//./-}"
-    test_create_cluster "${release}" "${name}" || failed+=("create_cluster_${name}")
-    test_snapshot "${release}" "${name}" || failed+=("snapshot_${name}")
-    test_delete_cluster "${release}" "${name}" || failed+=("delete_cluster_${name}")
+    create_cluster "etcd-${name}" "${release}"
+    test_snapshot_etcd "etcd-${name}" || failed+=("snapshot_etcd_${name}")
+    delete_cluster "etcd-${name}"
+
+    create_cluster "k8s-${name}" "${release}"
+    test_snapshot_k8s "k8s-${name}" || failed+=("snapshot_k8s_${name}")
+    delete_cluster "k8s-${name}"
   done
 
   if [[ "${#failed[@]}" -ne 0 ]]; then

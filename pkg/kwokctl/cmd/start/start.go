@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Package start implements the start command
 package start
 
 import (
@@ -28,9 +29,8 @@ import (
 func NewCommand(ctx context.Context) *cobra.Command {
 	cmd := &cobra.Command{
 		Args:  cobra.NoArgs,
-		Use:   "start",
+		Use:   "start [command]",
 		Short: "Start one of [cluster]",
-		Long:  "Start one of [cluster]",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return cmd.Help()
 		},

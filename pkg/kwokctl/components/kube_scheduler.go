@@ -18,16 +18,19 @@ package components
 
 import (
 	"sigs.k8s.io/kwok/pkg/apis/internalversion"
+	"sigs.k8s.io/kwok/pkg/consts"
+	"sigs.k8s.io/kwok/pkg/log"
 	"sigs.k8s.io/kwok/pkg/utils/format"
 	"sigs.k8s.io/kwok/pkg/utils/version"
 )
 
+// BuildKubeSchedulerComponentConfig is the configuration for building a kube-scheduler component.
 type BuildKubeSchedulerComponentConfig struct {
 	Binary           string
 	Image            string
 	Version          version.Version
 	Workdir          string
-	Address          string
+	BindAddress      string
 	Port             uint32
 	SecurePort       bool
 	CaCertPath       string
@@ -36,14 +39,16 @@ type BuildKubeSchedulerComponentConfig struct {
 	ConfigPath       string
 	KubeconfigPath   string
 	KubeFeatureGates string
+	Verbosity        log.Level
+	DisableQPSLimits bool
+	ExtraArgs        []internalversion.ExtraArgs
+	ExtraVolumes     []internalversion.Volume
 }
 
+// BuildKubeSchedulerComponent builds a kube-scheduler component.
 func BuildKubeSchedulerComponent(conf BuildKubeSchedulerComponentConfig) (component internalversion.Component, err error) {
-	if conf.Address == "" {
-		conf.Address = publicAddress
-	}
-
 	kubeSchedulerArgs := []string{}
+	kubeSchedulerArgs = append(kubeSchedulerArgs, extraArgsToStrings(conf.ExtraArgs)...)
 
 	if conf.KubeFeatureGates != "" {
 		kubeSchedulerArgs = append(kubeSchedulerArgs,
@@ -53,12 +58,19 @@ func BuildKubeSchedulerComponent(conf BuildKubeSchedulerComponentConfig) (compon
 
 	inContainer := conf.Image != ""
 	var volumes []internalversion.Volume
+	volumes = append(volumes, conf.ExtraVolumes...)
+	var ports []internalversion.Port
 
 	if inContainer {
 		volumes = append(volumes,
 			internalversion.Volume{
 				HostPath:  conf.KubeconfigPath,
 				MountPath: "/root/.kube/config",
+				ReadOnly:  true,
+			},
+			internalversion.Volume{
+				HostPath:  conf.CaCertPath,
+				MountPath: "/etc/kubernetes/pki/ca.crt",
 				ReadOnly:  true,
 			},
 			internalversion.Volume{
@@ -102,7 +114,7 @@ func BuildKubeSchedulerComponent(conf BuildKubeSchedulerComponentConfig) (compon
 	}
 
 	if conf.SecurePort {
-		if conf.Version.GE(version.NewVersion(1, 12, 0)) {
+		if conf.Version.GE(version.NewVersion(1, 13, 0)) {
 			kubeSchedulerArgs = append(kubeSchedulerArgs,
 				"--authorization-always-allow-paths=/healthz,/readyz,/livez,/metrics",
 			)
@@ -110,16 +122,24 @@ func BuildKubeSchedulerComponent(conf BuildKubeSchedulerComponentConfig) (compon
 
 		if inContainer {
 			kubeSchedulerArgs = append(kubeSchedulerArgs,
-				"--bind-address="+publicAddress,
+				"--bind-address="+conf.BindAddress,
 				"--secure-port=10259",
 			)
+			if conf.Port != 0 {
+				ports = append(
+					ports,
+					internalversion.Port{
+						HostPort: conf.Port,
+						Port:     10259,
+					},
+				)
+			}
 		} else {
 			kubeSchedulerArgs = append(kubeSchedulerArgs,
-				"--bind-address="+conf.Address,
+				"--bind-address="+conf.BindAddress,
 				"--secure-port="+format.String(conf.Port),
 			)
 		}
-
 		// TODO: Support disable insecure port
 		//	kubeSchedulerArgs = append(kubeSchedulerArgs,
 		//		"--port=0",
@@ -127,12 +147,21 @@ func BuildKubeSchedulerComponent(conf BuildKubeSchedulerComponentConfig) (compon
 	} else {
 		if inContainer {
 			kubeSchedulerArgs = append(kubeSchedulerArgs,
-				"--address="+publicAddress,
+				"--address="+conf.BindAddress,
 				"--port=10251",
 			)
+			if conf.Port != 0 {
+				ports = append(
+					ports,
+					internalversion.Port{
+						HostPort: conf.Port,
+						Port:     10251,
+					},
+				)
+			}
 		} else {
 			kubeSchedulerArgs = append(kubeSchedulerArgs,
-				"--address="+conf.Address,
+				"--address="+conf.BindAddress,
 				"--port="+format.String(conf.Port),
 			)
 		}
@@ -141,6 +170,17 @@ func BuildKubeSchedulerComponent(conf BuildKubeSchedulerComponentConfig) (compon
 		//	kubeSchedulerArgs = append(kubeSchedulerArgs,
 		//		"--secure-port=0",
 		//	)
+	}
+
+	if conf.DisableQPSLimits {
+		kubeSchedulerArgs = append(kubeSchedulerArgs,
+			"--kube-api-qps="+format.String(consts.DefaultUnlimitedQPS),
+			"--kube-api-burst="+format.String(consts.DefaultUnlimitedBurst),
+		)
+	}
+
+	if conf.Verbosity != log.LevelInfo {
+		kubeSchedulerArgs = append(kubeSchedulerArgs, "--v="+format.String(log.ToKlogLevel(conf.Verbosity)))
 	}
 
 	return internalversion.Component{
@@ -154,6 +194,7 @@ func BuildKubeSchedulerComponent(conf BuildKubeSchedulerComponentConfig) (compon
 		Args:    kubeSchedulerArgs,
 		Binary:  conf.Binary,
 		Image:   conf.Image,
+		Ports:   ports,
 		WorkDir: conf.Workdir,
 	}, nil
 }

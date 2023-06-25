@@ -20,7 +20,6 @@ package etcdctl
 import (
 	"context"
 	"fmt"
-	"os"
 
 	"github.com/spf13/cobra"
 
@@ -40,9 +39,8 @@ func NewCommand(ctx context.Context) *cobra.Command {
 	flags := &flagpole{}
 
 	cmd := &cobra.Command{
-		Use:   "etcdctl",
+		Use:   "etcdctl [command]",
 		Short: "etcdctl in cluster",
-		Long:  "etcdctl in cluster",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			flags.Name = config.DefaultCluster
 			err := runE(cmd.Context(), flags, args)
@@ -69,11 +67,7 @@ func runE(ctx context.Context, flags *flagpole, args []string) error {
 		return err
 	}
 
-	err = rt.EtcdctlInCluster(ctx, exec.IOStreams{
-		In:     os.Stdin,
-		Out:    os.Stdout,
-		ErrOut: os.Stderr,
-	}, args...)
+	err = rt.EtcdctlInCluster(exec.WithStdIO(ctx), args...)
 
 	if err != nil {
 		return err

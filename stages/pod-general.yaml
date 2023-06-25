@@ -14,8 +14,8 @@ spec:
         operator: 'DoesNotExist'
   weight: 1
   delay:
-    duration: 1s
-    jitterDuration: 5s
+    durationMilliseconds: 1000
+    jitterDurationMilliseconds: 5000
   next:
     event:
       type: Normal
@@ -26,6 +26,7 @@ spec:
         - value: 'kwok.x-k8s.io/fake'
     statusTemplate: |
       {{ $now := Now }}
+
       conditions:
       {{ if .spec.initContainers }}
         - lastProbeTime: null
@@ -94,8 +95,9 @@ spec:
               reason: ContainerCreating
         {{ end }}
       {{ end }}
-      hostIP: {{ with .status.hostIP }} {{ . }} {{ else }} {{ NodeIP }} {{ end }}
-      podIP: {{ with .status.podIP }} {{ . }} {{ else }} {{ PodIP }} {{ end }}
+
+      hostIP: {{ NodeIPWith .spec.nodeName }}
+      podIP: {{ PodIPWith .spec.nodeName ( or .spec.hostNetwork false ) ( or .metadata.uid "" ) ( or .metadata.name "" ) ( or .metadata.namespace "" ) }}
       phase: Pending
 ---
 kind: Stage
@@ -122,8 +124,8 @@ spec:
         operator: 'Exists'
   weight: 1
   delay:
-    duration: 1s
-    jitterDuration: 5s
+    durationMilliseconds: 1000
+    jitterDurationMilliseconds: 5000
   next:
     statusTemplate: |
       {{ $now := Now }}
@@ -165,8 +167,8 @@ spec:
         operator: 'Exists'
   weight: 1
   delay:
-    duration: 1s
-    jitterDuration: 5s
+    durationMilliseconds: 1000
+    jitterDurationMilliseconds: 5000
   next:
     statusTemplate: |
       {{ $now := Now }}
@@ -229,8 +231,8 @@ spec:
           - 'True'
   weight: 1
   delay:
-    duration: 1s
-    jitterDuration: 5s
+    durationMilliseconds: 1000
+    jitterDurationMilliseconds: 5000
   next:
     delete: false
     statusTemplate: |
@@ -266,7 +268,7 @@ spec:
 kind: Stage
 apiVersion: kwok.x-k8s.io/v1alpha1
 metadata:
-  name: pod-completed-for-job
+  name: pod-complete
 spec:
   resourceRef:
     apiGroup: v1
@@ -289,8 +291,8 @@ spec:
           - 'Job'
   weight: 1
   delay:
-    duration: 1s
-    jitterDuration: 5s
+    durationMilliseconds: 1000
+    jitterDurationMilliseconds: 5000
   next:
     delete: false
     statusTemplate: |
@@ -331,8 +333,8 @@ spec:
           - 'kwok.x-k8s.io/fake'
   weight: 1
   delay:
-    duration: 1s
-    jitterDuration: 5s
+    durationMilliseconds: 1000
+    jitterDurationMilliseconds: 5000
   next:
     finalizers:
       remove:
@@ -358,7 +360,7 @@ spec:
         operator: 'DoesNotExist'
   weight: 1
   delay:
-    duration: 1s
+    durationMilliseconds: 1000
     jitterDurationFrom:
       expressionFrom: '.metadata.deletionTimestamp'
   next:

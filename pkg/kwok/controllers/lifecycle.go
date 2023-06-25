@@ -29,23 +29,35 @@ import (
 	"k8s.io/apimachinery/pkg/util/yaml"
 
 	"sigs.k8s.io/kwok/pkg/apis/internalversion"
+	"sigs.k8s.io/kwok/pkg/apis/v1alpha1"
 	"sigs.k8s.io/kwok/pkg/utils/expression"
+	"sigs.k8s.io/kwok/pkg/utils/format"
 )
 
+// NewStagesFromYaml returns stages from yaml data.
 func NewStagesFromYaml(data []byte) ([]*internalversion.Stage, error) {
-	var podStageStatus []*internalversion.Stage
+	var stages []*internalversion.Stage
 	decoder := yaml.NewYAMLToJSONDecoder(bytes.NewBuffer(data))
 	for {
-		var stage internalversion.Stage
+		var stage v1alpha1.Stage
 		err := decoder.Decode(&stage)
-		if errors.Is(err, io.EOF) {
-			break
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return nil, err
 		}
-		podStageStatus = append(podStageStatus, &stage)
+
+		internalStage, err := internalversion.ConvertToInternalStage(&stage)
+		if err != nil {
+			return nil, err
+		}
+		stages = append(stages, internalStage)
 	}
-	return podStageStatus, nil
+	return stages, nil
 }
 
+// NewLifecycle returns a new Lifecycle.
 func NewLifecycle(stages []*internalversion.Stage) (Lifecycle, error) {
 	lcs := Lifecycle{}
 	for _, stage := range stages {
@@ -61,6 +73,7 @@ func NewLifecycle(stages []*internalversion.Stage) (Lifecycle, error) {
 	return lcs, nil
 }
 
+// Lifecycle is a list of lifecycle stage.
 type Lifecycle []*LifecycleStage
 
 func (s Lifecycle) match(label, annotation labels.Set, data interface{}) ([]*LifecycleStage, error) {
@@ -77,8 +90,9 @@ func (s Lifecycle) match(label, annotation labels.Set, data interface{}) ([]*Lif
 	return out, nil
 }
 
+// Match returns matched stage.
 func (s Lifecycle) Match(label, annotation labels.Set, data interface{}) (*LifecycleStage, error) {
-	data, err := expression.ToJsonStandard(data)
+	data, err := expression.ToJSONStandard(data)
 	if err != nil {
 		return nil, err
 	}
@@ -146,19 +160,24 @@ func newLifecycleFromStage(s *internalversion.Stage) (*LifecycleStage, error) {
 		if delay.DurationFrom != nil {
 			durationFrom = &delay.DurationFrom.ExpressionFrom
 		}
-		duration, err := expression.NewDurationFrom(&delay.Duration.Duration, durationFrom)
+		var delayDuration time.Duration
+		if delay.DurationMilliseconds != nil {
+			delayDuration = time.Duration(*delay.DurationMilliseconds) * time.Millisecond
+		}
+		duration, err := expression.NewDurationFrom(&delayDuration, durationFrom)
 		if err != nil {
 			return nil, err
 		}
 		stage.duration = duration
-		if delay.JitterDuration != nil || delay.JitterDurationFrom != nil {
+
+		if delay.JitterDurationMilliseconds != nil || delay.JitterDurationFrom != nil {
 			var jitterDurationFrom *string
 			if delay.JitterDurationFrom != nil {
 				jitterDurationFrom = &delay.JitterDurationFrom.ExpressionFrom
 			}
 			var jitterDuration *time.Duration
-			if delay.JitterDuration != nil {
-				jitterDuration = &delay.JitterDuration.Duration
+			if delay.JitterDurationMilliseconds != nil {
+				jitterDuration = format.Ptr(time.Duration(*delay.JitterDurationMilliseconds) * time.Millisecond)
 			}
 			jitterDurationGetter, err := expression.NewDurationFrom(jitterDuration, jitterDurationFrom)
 			if err != nil {
@@ -174,9 +193,12 @@ func newLifecycleFromStage(s *internalversion.Stage) (*LifecycleStage, error) {
 		stage.weight = 0
 	}
 
+	stage.immediateNextStage = s.Spec.ImmediateNextStage
+
 	return stage, nil
 }
 
+// LifecycleStage is a resource lifecycle stage manager
 type LifecycleStage struct {
 	name             string
 	matchLabels      labels.Selector
@@ -188,6 +210,8 @@ type LifecycleStage struct {
 
 	duration       expression.DurationGetter
 	jitterDuration expression.DurationGetter
+
+	immediateNextStage bool
 }
 
 func (s *LifecycleStage) match(label, annotation labels.Set, jsonStandard interface{}) (bool, error) {
@@ -216,6 +240,8 @@ func (s *LifecycleStage) match(label, annotation labels.Set, jsonStandard interf
 	return true, nil
 }
 
+// Delay returns the delay duration of the stage.
+// It's not a constant value, it can be a random value.
 func (s *LifecycleStage) Delay(ctx context.Context, v interface{}, now time.Time) (time.Duration, bool) {
 	if s.duration == nil {
 		return 0, false
@@ -243,10 +269,17 @@ func (s *LifecycleStage) Delay(ctx context.Context, v interface{}, now time.Time
 	return duration + time.Duration(rand.Int63n(int64(jitterDuration-duration))), true
 }
 
+// Next returns the next of the stage.
 func (s *LifecycleStage) Next() *internalversion.StageNext {
 	return s.next
 }
 
+// Name returns the name of the stage
 func (s *LifecycleStage) Name() string {
 	return s.name
+}
+
+// ImmediateNextStage returns whether the stage is immediate next stage.
+func (s *LifecycleStage) ImmediateNextStage() bool {
+	return s.immediateNextStage
 }

@@ -1,4 +1,8 @@
-# Manage nodes and pods with kwok
+---
+title: Manage Nodes and Pods
+---
+
+# Manage nodes and pods with `kwok`
 
 {{< hint "info" >}}
 
@@ -6,17 +10,31 @@ This document walks you through how to manage nodes and pods with `kwok`.
 
 {{< /hint >}}
 
-## Kwok with args `--manage-all-nodes=true`
+## Node Management
 
-Kwok will be in charge of all nodes in the cluster and maintain their heartbeats to API Server. In this way, all nodes will behave like real nodes and stay in `Ready` state.
+`--manage-all-nodes` cannot be used together with `--manage-nodes-with-annotation-selector` and `--manage-nodes-with-label-selector`.
 
-## Kwok with args `--manage-nodes-with-annotation-selector=kwok.x-k8s.io/node=fake`
+### For all nodes
 
-Kwok will be in charge of all Pods with annotation `kwok.x-k8s.io/node=fake`. If they carry an accurate `.spec.nodeName` filed, Kwok will ensure they stay in the `Running` state.
+With the `--manage-all-nodes=true` argument,
+`kwok` will be in charge of all nodes in the cluster and maintain their heartbeats to the API Server.
+In this way, all nodes will behave like real nodes and stay in the `Ready` state.
+
+### For specific nodes with annotation
+
+With the `--manage-nodes-with-annotation-selector=kwok.x-k8s.io/node=fake` argument,
+`kwok` just manages the nodes with the annotation `kwok.x-k8s.io/node=fake`.
+If the annotation is not present, `kwok` will not manage the node.
+
+### For specific nodes with label
+
+With the `--manage-nodes-with-label-selector=kwok.x-k8s.io/node=fake` argument,
+`kwok` just manages the nodes with the label `kwok.x-k8s.io/node=fake`.
+If the label is not present, `kwok` will not manage the node.
 
 ## Create a Node
 
-With Kwok, you can join arbitrary Node(s) just by simply creating `v1.Node` object(s):
+With `kwok`, you can join arbitrary Node(s) simply by creating `v1.Node` object(s):
 
 > The status can be any value.
 
@@ -40,9 +58,9 @@ metadata:
   name: kwok-node-0
 spec:
   taints: # Avoid scheduling actual running pods to fake Node
-    - effect: NoSchedule
-      key: kwok.x-k8s.io/node
-      value: fake
+  - effect: NoSchedule
+    key: kwok.x-k8s.io/node
+    value: fake
 status:
   allocatable:
     cpu: 32
@@ -67,7 +85,7 @@ status:
 EOF
 ```
 
-After the Node is created, Kwok will maintain its heartbeat and keep it in the `ready` state.
+After the Node is created, `kwok` will maintain its heartbeat and keep it in the `ready` state.
 
 ``` console
 $ kubectl get node -o wide
@@ -100,20 +118,20 @@ spec:
         nodeAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
             nodeSelectorTerms:
-              - matchExpressions:
-                  - key: type
-                    operator: In
-                    values:
-                      - kwok
+            - matchExpressions:
+              - key: type
+                operator: In
+                values:
+                - kwok
       # A taints was added to an automatically created Node.
       # You can remove taints of Node or add this tolerations.
       tolerations:
-        - key: "kwok.x-k8s.io/node"
-          operator: "Exists"
-          effect: "NoSchedule"
+      - key: "kwok.x-k8s.io/node"
+        operator: "Exists"
+        effect: "NoSchedule"
       containers:
-        - name: fake-container
-          image: fake-image
+      - name: fake-container
+        image: fake-image
 EOF
 ```
 
@@ -136,4 +154,4 @@ fake-pod-59bb47845f-wxn4b   1/1     Running   0          5s    10.0.0.1    kwok-
 
 ## Update spec of nodes or pods
 
-In a Kwok context, Nodes and Pods are nothing but pure API objects so feel free to mutate their API specs to do whatever simulation or testing you want.
+In a `kwok` context, Nodes and Pods are nothing but pure API objects so feel free to mutate their API specs to do whatever simulation or testing you want.

@@ -23,8 +23,8 @@ function color() {
   echo -e "\033[1;${color}m${text}\033[0m"
 }
 
-PLAY_PWD="${PLAY_PWD:-"~/go/src/sigs.k8s.io/kwok"}"
-PLAY_PS1="$(color 96 "${PLAY_PWD}") $(color 94 "$") "
+PLAY_PWD="${PLAY_PWD:-"~/sigs.k8s.io/kwok"}"
+PLAY_PS1="$(color 96 "${PLAY_PWD}")$(color 94 "$") "
 
 function ps1() {
   local delay="${1}"
@@ -39,7 +39,7 @@ function type_message() {
   local message="$1"
   local delay="${2:-0.02}"
   local entry_delay="${3:-0.1}"
-  for (( i=0; i<${#message}; i++ )); do
+  for ((i = 0; i < ${#message}; i++)); do
     echo -n "${message:$i:1}"
     sleep "${delay}"
   done
@@ -57,7 +57,7 @@ function type_and_exec_command() {
 # play_file plays a file line by line.
 function play_file() {
   local file="$1"
-  cat "${file}" | while read -r line; do
+  while read -r line; do
     if [[ "${line}" =~ ^# ]]; then
       ps1 0.5
       type_message "${line}"
@@ -68,7 +68,7 @@ function play_file() {
       ps1 1
       type_and_exec_command "${line}"
     fi
-  done
+  done <"${file}"
 }
 
 play_file "$1"

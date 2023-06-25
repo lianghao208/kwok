@@ -18,31 +18,35 @@ package components
 
 import (
 	"sigs.k8s.io/kwok/pkg/apis/internalversion"
+	"sigs.k8s.io/kwok/pkg/log"
 	"sigs.k8s.io/kwok/pkg/utils/format"
 	"sigs.k8s.io/kwok/pkg/utils/version"
 )
 
+// BuildPrometheusComponentConfig is the configuration for building a prometheus component.
 type BuildPrometheusComponentConfig struct {
 	Binary        string
 	Image         string
 	Version       version.Version
 	Workdir       string
-	Address       string
+	BindAddress   string
 	Port          uint32
 	ConfigPath    string
 	AdminCertPath string
 	AdminKeyPath  string
+	Verbosity     log.Level
+	ExtraArgs     []internalversion.ExtraArgs
+	ExtraVolumes  []internalversion.Volume
 }
 
+// BuildPrometheusComponent builds a prometheus component.
 func BuildPrometheusComponent(conf BuildPrometheusComponentConfig) (component internalversion.Component, err error) {
-	if conf.Address == "" {
-		conf.Address = publicAddress
-	}
-
 	prometheusArgs := []string{}
+	prometheusArgs = append(prometheusArgs, extraArgsToStrings(conf.ExtraArgs)...)
 
 	inContainer := conf.Image != ""
 	var volumes []internalversion.Volume
+	volumes = append(volumes, conf.ExtraVolumes...)
 	var ports []internalversion.Port
 	if inContainer {
 		volumes = append(volumes,
@@ -70,13 +74,17 @@ func BuildPrometheusComponent(conf BuildPrometheusComponentConfig) (component in
 		}
 		prometheusArgs = append(prometheusArgs,
 			"--config.file=/etc/prometheus/prometheus.yaml",
-			"--web.listen-address="+publicAddress+":9090",
+			"--web.listen-address="+conf.BindAddress+":9090",
 		)
 	} else {
 		prometheusArgs = append(prometheusArgs,
 			"--config.file="+conf.ConfigPath,
-			"--web.listen-address="+conf.Address+":"+format.String(conf.Port),
+			"--web.listen-address="+conf.BindAddress+":"+format.String(conf.Port),
 		)
+	}
+
+	if conf.Verbosity != log.LevelInfo {
+		prometheusArgs = append(prometheusArgs, "--log.level="+log.ToLogSeverityLevel(conf.Verbosity))
 	}
 
 	return internalversion.Component{

@@ -15,8 +15,6 @@
 
 DIR="$(dirname "${BASH_SOURCE[0]}")"
 
-DIR="$(realpath "${DIR}")"
-
 ROOT_DIR="$(realpath "${DIR}/..")"
 
 record="${ROOT_DIR}/supported_releases.txt"
@@ -84,9 +82,9 @@ function send_pr() {
   fi
 
   # Use the fixed branch as the key to prevent duplicate PRs from being created
-  branch="bump-releases"
+  branch="dependabot/bump-releases"
 
-  if [[ "$(git branch -r --list "origin/${branch}")" =~ "origin/${branch}" ]]; then
+  if [[ "$(git branch -r --list "origin/${branch}")" == *"origin/${branch}"* ]]; then
     echo "Remote branch already exists"
     return 0
   fi
@@ -131,7 +129,7 @@ function main() {
   fi
 
   record_data="$(record_releases)"
-  out="$(bump ${record_data} ${latest_data} | sort --reverse --version-sort)"
+  out="$(bump "${record_data}" "${latest_data}" | sort --reverse --version-sort)"
 
   if [[ "${out}" == "$(record_releases)" ]]; then
     echo "No update"
@@ -142,6 +140,9 @@ function main() {
 
   # Update feature gate data
   "${ROOT_DIR}/pkg/kwokctl/k8s/feature_gates_data.sh" "$(echo "${out}" | head -n 1 | awk -F. '{print $2}')"
+
+  # Update the generated files
+  make -C "${ROOT_DIR}" update
 
   if [[ "${SEND_PR}" == "true" ]]; then
     send_pr

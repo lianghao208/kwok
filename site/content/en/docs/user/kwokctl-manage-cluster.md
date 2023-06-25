@@ -1,4 +1,8 @@
-# Use Kwokctl Create a Cluster
+---
+title: "`kwokctl` Manage Clusters"
+---
+
+# Create a Cluster with `kwokctl`
 
 {{< hint "info" >}}
 
@@ -6,24 +10,9 @@ This document walks you through how to run `kwokctl` to manage fake clusters.
 
 {{< /hint >}}
 
-## Variables preparation
+## Install `kwokctl`
 
-``` bash
-# Kwok repository to download image from
-KWOK_REPO=kubernetes-sigs/kwok
-# Get latest Kwok binary
-KWOK_LATEST_RELEASE=$(curl "https://api.github.com/repos/${KWOK_REPO}/releases/latest" | jq -r '.tag_name')
-```
-
-## Install Kwokctl
-
-Firstly, we download and install Kwokctl
-
-``` bash
-wget -O kwokctl -c "https://github.com/${KWOK_REPO}/releases/download/${KWOK_LATEST_RELEASE}/kwokctl-$(go env GOOS)-$(go env GOARCH)"
-chmod +x kwokctl
-sudo mv kwokctl /usr/local/bin/kwokctl
-```
+[Install `kwokctl`][install] in your environment.
 
 ## Create a Cluster
 
@@ -67,3 +56,10 @@ Stopping cluster "kwok-kwok"
 Deleting cluster "kwok-kwok"
 Cluster "kwok-kwok" deleted
 ```
+
+## Next steps
+
+Now, you can use `kwok` to [manage nodes and pods] in the Kubernetes cluster.
+
+[manage nodes and pods]: {{< relref "/docs/user/kwok-manage-nodes-and-pods" >}}
+[install]: {{< relref "/docs/user/installation" >}}

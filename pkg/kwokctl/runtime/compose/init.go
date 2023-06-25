@@ -22,6 +22,7 @@ import (
 )
 
 func init() {
-	runtime.DefaultRegistry.Register(consts.RuntimeTypeDocker, NewCluster)
-	runtime.DefaultRegistry.Register(consts.RuntimeTypeNerdctl, NewCluster)
+	runtime.DefaultRegistry.Register(consts.RuntimeTypeDocker, NewDockerCluster)
+	runtime.DefaultRegistry.Register(consts.RuntimeTypeNerdctl, NewNerdctlCluster)
+	runtime.DefaultRegistry.Register(consts.RuntimeTypePodman, NewPodmanCluster)
 }

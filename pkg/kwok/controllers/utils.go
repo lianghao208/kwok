@@ -20,9 +20,11 @@ import (
 	"encoding/binary"
 	"net"
 	"sync"
-	"time"
 
+	"github.com/wzshiming/cron"
 	"k8s.io/apimachinery/pkg/labels"
+
+	"sigs.k8s.io/kwok/pkg/utils/maps"
 )
 
 func parseCIDR(s string) (*net.IPNet, error) {
@@ -116,97 +118,21 @@ func (i *ipPool) Use(ip string) {
 	i.used[ip] = struct{}{}
 }
 
-type parallelTasks struct {
-	wg     sync.WaitGroup
-	bucket chan struct{}
-	tasks  chan func()
-}
-
-func newParallelTasks(n int) *parallelTasks {
-	return &parallelTasks{
-		bucket: make(chan struct{}, n),
-		tasks:  make(chan func()),
-	}
-}
-
-func (p *parallelTasks) Add(fun func()) {
-	p.wg.Add(1)
-	select {
-	case p.tasks <- fun: // there are idle threads
-	case p.bucket <- struct{}{}: // there are free threads
-		go p.fork()
-		p.tasks <- fun
-	}
-}
-
-func (p *parallelTasks) fork() {
-	defer func() {
-		<-p.bucket
-	}()
-	timer := time.NewTimer(time.Second / 2)
-	for {
-		select {
-		case <-timer.C: // idle threads
-			return
-		case fun := <-p.tasks:
-			fun()
-			p.wg.Done()
-			timer.Reset(time.Second / 2)
-		}
-	}
-}
-
-func (p *parallelTasks) Wait() {
-	p.wg.Wait()
-}
-
-type stringSets struct {
-	mut  sync.RWMutex
-	sets map[string]struct{}
-}
-
-func newStringSets() *stringSets {
-	return &stringSets{
-		sets: make(map[string]struct{}),
-	}
-}
-
-func (s *stringSets) Size() int {
-	s.mut.RLock()
-	defer s.mut.RUnlock()
-	return len(s.sets)
-}
-
-func (s *stringSets) Put(key string) {
-	s.mut.Lock()
-	defer s.mut.Unlock()
-	s.sets[key] = struct{}{}
-}
-
-func (s *stringSets) Delete(key string) {
-	s.mut.Lock()
-	defer s.mut.Unlock()
-	delete(s.sets, key)
-}
-
-func (s *stringSets) Has(key string) bool {
-	s.mut.RLock()
-	defer s.mut.RUnlock()
-	_, ok := s.sets[key]
-	return ok
-}
-
-func (s *stringSets) Foreach(f func(string)) {
-	s.mut.RLock()
-	defer s.mut.RUnlock()
-	for k := range s.sets {
-		f(k)
-	}
-}
-
 func labelsParse(selector string) (labels.Selector, error) {
 	if selector == "" {
 		return nil, nil
 	}
 	return labels.Parse(selector)
+}
+
+type jobInfoMap = maps.SyncMap[string, jobInfo]
+
+type jobInfo struct {
+	ResourceVersion string
+	Cancel          cron.DoFunc
+}
+
+type resourceStageJob[T any] struct {
+	Resource T
+	Stage    *LifecycleStage
 }

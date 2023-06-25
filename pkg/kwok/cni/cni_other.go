@@ -23,14 +23,12 @@ import (
 	"fmt"
 )
 
-func SupportedCNI() bool {
-	return false
-}
-
+// Setup is stubbed out on non-Linux platforms.
 func Setup(ctx context.Context, id, name, namespace string) (ip []string, err error) {
 	return nil, fmt.Errorf("unsupported")
 }
 
+// Remove is stubbed out on non-Linux platforms.
 func Remove(ctx context.Context, id, name, namespace string) (err error) {
 	return fmt.Errorf("unsupported")
 }

@@ -20,6 +20,7 @@ package artifacts
 import (
 	"context"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 
@@ -48,7 +49,6 @@ func NewCommand(ctx context.Context) *cobra.Command {
 		Args:  cobra.NoArgs,
 		Use:   "artifacts",
 		Short: "Lists binaries or images used by cluster",
-		Long:  "Lists binaries or images used by cluster",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			flags.Name = config.DefaultCluster
 			return runE(cmd.Context(), flags)
@@ -104,18 +104,17 @@ func runE(ctx context.Context, flags *flagpole) error {
 
 	if len(artifacts) == 0 {
 		if flags.Filter == "" {
-			logger.Info("No artifacts found",
-				"runtime", flags.Options.Runtime,
-			)
+			if log.IsTerminal() {
+				_, _ = fmt.Fprintf(os.Stderr, "No artifacts found for runtime %q", flags.Options.Runtime)
+			}
 		} else {
-			logger.Info("No artifacts found",
-				"runtime", flags.Options.Runtime,
-				"filter", flags.Filter,
-			)
+			if log.IsTerminal() {
+				_, _ = fmt.Fprintf(os.Stderr, "No artifacts found for runtime %q and filter %q", flags.Options.Runtime, flags.Filter)
+			}
 		}
 	} else {
 		for _, artifact := range artifacts {
-			fmt.Println(artifact)
+			_, _ = fmt.Println(artifact)
 		}
 	}
 	return nil

@@ -19,6 +19,7 @@ package logs
 
 import (
 	"context"
+	"errors"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -39,9 +40,8 @@ func NewCommand(ctx context.Context) *cobra.Command {
 	flags := &flagpole{}
 
 	cmd := &cobra.Command{
-		Use:   "logs",
+		Use:   "logs [command]",
 		Short: "Logs one of [audit, etcd, kube-apiserver, kube-controller-manager, kube-scheduler, kwok-controller, prometheus]",
-		Long:  "Logs one of [audit, etcd, kube-apiserver, kube-controller-manager, kube-scheduler, kwok-controller, prometheus]",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
 				return cmd.Help()
@@ -64,6 +64,9 @@ func runE(ctx context.Context, flags *flagpole, args []string) error {
 
 	rt, err := runtime.DefaultRegistry.Load(ctx, name, workdir)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			logger.Warn("Cluster is not exists")
+		}
 		return err
 	}
 

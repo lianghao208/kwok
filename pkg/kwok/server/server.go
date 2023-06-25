@@ -28,26 +28,51 @@ import (
 	"github.com/wzshiming/cmux/pattern"
 	remotecommandconsts "k8s.io/apimachinery/pkg/util/remotecommand"
 
+	"sigs.k8s.io/kwok/pkg/apis/internalversion"
+	"sigs.k8s.io/kwok/pkg/kwok/controllers"
 	"sigs.k8s.io/kwok/pkg/log"
+	"sigs.k8s.io/kwok/pkg/utils/pools"
 )
 
 const (
 	pprofBasePath = "/debug/pprof/"
 )
 
+// Server is a server that can serve HTTP/HTTPS requests.
 type Server struct {
 	restfulCont *restful.Container
 
 	idleTimeout           time.Duration
 	streamCreationTimeout time.Duration
+	config                Config
+	bufPool               *pools.Pool[[]byte]
 }
 
-func NewServer() *Server {
+// Config holds configurations needed by the server handlers.
+type Config struct {
+	ClusterPortForwards []*internalversion.ClusterPortForward
+	PortForwards        []*internalversion.PortForward
+	ClusterExecs        []*internalversion.ClusterExec
+	Execs               []*internalversion.Exec
+	ClusterLogs         []*internalversion.ClusterLogs
+	Logs                []*internalversion.Logs
+	ClusterAttaches     []*internalversion.ClusterAttach
+	Attaches            []*internalversion.Attach
+	Metrics             []*internalversion.Metric
+	Controller          *controllers.Controller
+}
+
+// NewServer creates a new Server.
+func NewServer(config Config) *Server {
 	container := restful.NewContainer()
 	return &Server{
 		restfulCont:           container,
 		idleTimeout:           1 * time.Hour,
 		streamCreationTimeout: remotecommandconsts.DefaultStreamCreationTimeout,
+		config:                config,
+		bufPool: pools.NewPool(func() []byte {
+			return make([]byte, 32*1024)
+		}),
 	}
 }
 
@@ -57,6 +82,8 @@ func getHandlerForDisabledEndpoint(errorMessage string) http.HandlerFunc {
 	}
 }
 
+// Run runs the specified Server.
+// This should never exit.
 func (s *Server) Run(ctx context.Context, address string, certFile, privateKeyFile string) error {
 	logger := log.FromContext(ctx)
 	listener, err := net.Listen("tcp", address)

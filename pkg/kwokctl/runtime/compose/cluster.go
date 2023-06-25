@@ -17,12 +17,13 @@ limitations under the License.
 package compose
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"sigs.k8s.io/yaml"
@@ -33,24 +34,104 @@ import (
 	"sigs.k8s.io/kwok/pkg/kwokctl/pki"
 	"sigs.k8s.io/kwok/pkg/kwokctl/runtime"
 	"sigs.k8s.io/kwok/pkg/log"
+	"sigs.k8s.io/kwok/pkg/utils/envs"
 	"sigs.k8s.io/kwok/pkg/utils/exec"
 	"sigs.k8s.io/kwok/pkg/utils/file"
 	"sigs.k8s.io/kwok/pkg/utils/format"
 	"sigs.k8s.io/kwok/pkg/utils/image"
+	"sigs.k8s.io/kwok/pkg/utils/kubeconfig"
 	"sigs.k8s.io/kwok/pkg/utils/net"
 	"sigs.k8s.io/kwok/pkg/utils/path"
-	"sigs.k8s.io/kwok/pkg/utils/slices"
 	"sigs.k8s.io/kwok/pkg/utils/version"
+	"sigs.k8s.io/kwok/pkg/utils/wait"
 )
 
+// Cluster is an implementation of Runtime for docker.
 type Cluster struct {
 	*runtime.Cluster
+
+	runtime string
+
+	selfCompose *bool
+
+	composeCommands []string
+
+	canNerdctlUnlessStopped *bool
 }
 
-func NewCluster(name, workdir string) (runtime.Runtime, error) {
+// NewPodmanCluster creates a new Runtime for podman.
+func NewPodmanCluster(name, workdir string) (runtime.Runtime, error) {
 	return &Cluster{
 		Cluster: runtime.NewCluster(name, workdir),
+		runtime: consts.RuntimeTypePodman,
 	}, nil
+}
+
+// NewNerdctlCluster creates a new Runtime for nerdctl.
+func NewNerdctlCluster(name, workdir string) (runtime.Runtime, error) {
+	return &Cluster{
+		Cluster: runtime.NewCluster(name, workdir),
+		runtime: consts.RuntimeTypeNerdctl,
+	}, nil
+}
+
+// NewDockerCluster creates a new Runtime for docker.
+func NewDockerCluster(name, workdir string) (runtime.Runtime, error) {
+	return &Cluster{
+		Cluster: runtime.NewCluster(name, workdir),
+		runtime: consts.RuntimeTypeDocker,
+	}, nil
+}
+
+var (
+	selfComposePrefer = envs.GetEnvWithPrefix("CONTAINER_SELF_COMPOSE", "auto")
+)
+
+// getSwitchStatus parses the value to bool pointer.
+func getSwitchStatus(value string) (*bool, error) {
+	if strings.ToLower(value) == "auto" {
+		return nil, nil
+	}
+	b, err := strconv.ParseBool(value)
+	if err != nil {
+		return nil, err
+	}
+	return &b, nil
+}
+
+func (c *Cluster) isSelfCompose(ctx context.Context, creating bool) bool {
+	if c.selfCompose != nil {
+		return *c.selfCompose
+	}
+
+	var err error
+	logger := log.FromContext(ctx)
+
+	c.selfCompose, err = getSwitchStatus(selfComposePrefer)
+	if err != nil {
+		logger.Warn("Failed to parse env KWOK_CONTAINER_SELF_COMPOSE, ignore it, fallback to auto", "err", err)
+	} else if c.selfCompose != nil {
+		logger.Info("Found env KWOK_CONTAINER_SELF_COMPOSE, use it", "value", *c.selfCompose)
+		return *c.selfCompose
+	}
+
+	if creating {
+		// When create a new cluster, then use self-compose.
+		c.selfCompose = format.Ptr(true)
+	} else {
+		// otherwise, check whether the compose file exists.
+		// If not exists, then use self-compose.
+		// If exists, then use *-compose.
+		composePath := c.GetWorkdirPath(runtime.ComposeName)
+		c.selfCompose = format.Ptr(!file.Exists(composePath))
+	}
+
+	return *c.selfCompose
+}
+
+// Available  checks whether the runtime is available.
+func (c *Cluster) Available(ctx context.Context) error {
+	return exec.Exec(ctx, c.runtime, "version")
 }
 
 func (c *Cluster) setup(ctx context.Context) error {
@@ -62,7 +143,20 @@ func (c *Cluster) setup(ctx context.Context) error {
 
 	pkiPath := c.GetWorkdirPath(runtime.PkiName)
 	if !file.Exists(pkiPath) {
-		err = pki.GeneratePki(pkiPath)
+		sans := []string{
+			c.Name() + "-kube-apiserver",
+		}
+		ips, err := net.GetAllIPs()
+		if err != nil {
+			logger := log.FromContext(ctx)
+			logger.Warn("failed to get all ips", "err", err)
+		} else {
+			sans = append(sans, ips...)
+		}
+		if len(conf.KubeApiserverCertSANs) != 0 {
+			sans = append(sans, conf.KubeApiserverCertSANs...)
+		}
+		err = pki.GeneratePki(pkiPath, sans...)
 		if err != nil {
 			return fmt.Errorf("failed to generate pki: %w", err)
 		}
@@ -104,7 +198,10 @@ func (c *Cluster) setupPorts(ctx context.Context, ports ...*uint32) error {
 	return nil
 }
 
+// Install installs the cluster
 func (c *Cluster) Install(ctx context.Context) error {
+	logger := log.FromContext(ctx)
+	verbosity := logger.Level()
 	config, err := c.Config(ctx)
 	if err != nil {
 		return err
@@ -122,7 +219,6 @@ func (c *Cluster) Install(ctx context.Context) error {
 	etcdDataPath := c.GetWorkdirPath(runtime.EtcdDataDirName)
 	kwokConfigPath := c.GetWorkdirPath(runtime.ConfigName)
 	pkiPath := c.GetWorkdirPath(runtime.PkiName)
-	composePath := c.GetWorkdirPath(runtime.ComposeName)
 	auditLogPath := ""
 	auditPolicyPath := ""
 	if conf.KubeAuditPolicy != "" {
@@ -131,13 +227,11 @@ func (c *Cluster) Install(ctx context.Context) error {
 	}
 
 	workdir := c.Workdir()
-	adminKeyPath := ""
-	adminCertPath := ""
-	caCertPath := ""
-	caCertPath = path.Join(pkiPath, "ca.crt")
-	adminKeyPath = path.Join(pkiPath, "admin.key")
-	adminCertPath = path.Join(pkiPath, "admin.crt")
+	caCertPath := path.Join(pkiPath, "ca.crt")
+	adminKeyPath := path.Join(pkiPath, "admin.key")
+	adminCertPath := path.Join(pkiPath, "admin.crt")
 	inClusterPkiPath := "/etc/kubernetes/pki/"
+	inClusterCaCertPath := path.Join(inClusterPkiPath, "ca.crt")
 	inClusterAdminKeyPath := path.Join(inClusterPkiPath, "admin.key")
 	inClusterAdminCertPath := path.Join(inClusterPkiPath, "admin.crt")
 
@@ -169,22 +263,32 @@ func (c *Cluster) Install(ctx context.Context) error {
 	if conf.PrometheusPort != 0 {
 		images = append(images, conf.PrometheusImage)
 	}
-	err = image.PullImages(ctx, conf.Runtime, images, conf.QuietPull)
+	err = image.PullImages(ctx, c.runtime, images, conf.QuietPull)
 	if err != nil {
 		return err
 	}
 
 	// Configure the etcd
-	etcdVersion, err := version.ParseFromImage(ctx, conf.Runtime, conf.EtcdImage, "etcd")
+	etcdVersion, err := version.ParseFromImage(ctx, c.runtime, conf.EtcdImage, "etcd")
 	if err != nil {
 		return err
 	}
+
+	etcdComponentPatches := runtime.GetComponentPatches(config, "etcd")
+	etcdComponentPatches.ExtraVolumes, err = runtime.ExpandVolumesHostPaths(etcdComponentPatches.ExtraVolumes)
+	if err != nil {
+		return fmt.Errorf("failed to expand host volumes for etcd component: %w", err)
+	}
 	etcdComponent, err := components.BuildEtcdComponent(components.BuildEtcdComponentConfig{
-		Workdir:  workdir,
-		Image:    conf.EtcdImage,
-		Version:  etcdVersion,
-		Port:     conf.EtcdPort,
-		DataPath: etcdDataPath,
+		Workdir:      workdir,
+		Image:        conf.EtcdImage,
+		Version:      etcdVersion,
+		BindAddress:  net.PublicAddress,
+		Port:         conf.EtcdPort,
+		DataPath:     etcdDataPath,
+		Verbosity:    verbosity,
+		ExtraArgs:    etcdComponentPatches.ExtraArgs,
+		ExtraVolumes: etcdComponentPatches.ExtraVolumes,
 	})
 	if err != nil {
 		return err
@@ -192,19 +296,27 @@ func (c *Cluster) Install(ctx context.Context) error {
 	config.Components = append(config.Components, etcdComponent)
 
 	// Configure the kube-apiserver
-	kubeApiserverVersion, err := version.ParseFromImage(ctx, conf.Runtime, conf.KubeApiserverImage, "kube-apiserver")
+	kubeApiserverVersion, err := version.ParseFromImage(ctx, c.runtime, conf.KubeApiserverImage, "kube-apiserver")
 	if err != nil {
 		return err
+	}
+
+	kubeApiserverComponentPatches := runtime.GetComponentPatches(config, "kube-apiserver")
+	kubeApiserverComponentPatches.ExtraVolumes, err = runtime.ExpandVolumesHostPaths(kubeApiserverComponentPatches.ExtraVolumes)
+	if err != nil {
+		return fmt.Errorf("failed to expand host volumes for kube api server component: %w", err)
 	}
 	kubeApiserverComponent, err := components.BuildKubeApiserverComponent(components.BuildKubeApiserverComponentConfig{
 		Workdir:           workdir,
 		Image:             conf.KubeApiserverImage,
 		Version:           kubeApiserverVersion,
+		BindAddress:       net.PublicAddress,
 		Port:              conf.KubeApiserverPort,
 		KubeRuntimeConfig: conf.KubeRuntimeConfig,
 		KubeFeatureGates:  conf.KubeFeatureGates,
 		SecurePort:        conf.SecurePort,
 		KubeAuthorization: conf.KubeAuthorization,
+		KubeAdmission:     conf.KubeAdmission,
 		AuditPolicyPath:   auditPolicyPath,
 		AuditLogPath:      auditLogPath,
 		CaCertPath:        caCertPath,
@@ -212,6 +324,10 @@ func (c *Cluster) Install(ctx context.Context) error {
 		AdminKeyPath:      adminKeyPath,
 		EtcdPort:          conf.EtcdPort,
 		EtcdAddress:       c.Name() + "-etcd",
+		Verbosity:         verbosity,
+		DisableQPSLimits:  conf.DisableQPSLimits,
+		ExtraArgs:         kubeApiserverComponentPatches.ExtraArgs,
+		ExtraVolumes:      kubeApiserverComponentPatches.ExtraVolumes,
 	})
 	if err != nil {
 		return err
@@ -220,22 +336,35 @@ func (c *Cluster) Install(ctx context.Context) error {
 
 	// Configure the kube-controller-manager
 	if !conf.DisableKubeControllerManager {
-		kubeControllerManagerVersion, err := version.ParseFromImage(ctx, conf.Runtime, conf.KubeControllerManagerImage, "kube-controller-manager")
+		kubeControllerManagerVersion, err := version.ParseFromImage(ctx, c.runtime, conf.KubeControllerManagerImage, "kube-controller-manager")
 		if err != nil {
 			return err
 		}
+
+		kubeControllerManagerComponentPatches := runtime.GetComponentPatches(config, "kube-controller-manager")
+		kubeControllerManagerComponentPatches.ExtraVolumes, err = runtime.ExpandVolumesHostPaths(kubeControllerManagerComponentPatches.ExtraVolumes)
+		if err != nil {
+			return fmt.Errorf("failed to expand host volumes for kube controller manager component: %w", err)
+		}
 		kubeControllerManagerComponent, err := components.BuildKubeControllerManagerComponent(components.BuildKubeControllerManagerComponentConfig{
-			Workdir:           workdir,
-			Image:             conf.KubeControllerManagerImage,
-			Version:           kubeControllerManagerVersion,
-			Port:              conf.KubeControllerManagerPort,
-			SecurePort:        conf.SecurePort,
-			CaCertPath:        caCertPath,
-			AdminCertPath:     adminCertPath,
-			AdminKeyPath:      adminKeyPath,
-			KubeAuthorization: conf.KubeAuthorization,
-			KubeconfigPath:    inClusterOnHostKubeconfigPath,
-			KubeFeatureGates:  conf.KubeFeatureGates,
+			Workdir:                            workdir,
+			Image:                              conf.KubeControllerManagerImage,
+			Version:                            kubeControllerManagerVersion,
+			BindAddress:                        net.PublicAddress,
+			Port:                               conf.KubeControllerManagerPort,
+			SecurePort:                         conf.SecurePort,
+			CaCertPath:                         caCertPath,
+			AdminCertPath:                      adminCertPath,
+			AdminKeyPath:                       adminKeyPath,
+			KubeAuthorization:                  conf.KubeAuthorization,
+			KubeconfigPath:                     inClusterOnHostKubeconfigPath,
+			KubeFeatureGates:                   conf.KubeFeatureGates,
+			Verbosity:                          verbosity,
+			DisableQPSLimits:                   conf.DisableQPSLimits,
+			NodeMonitorPeriodMilliseconds:      conf.KubeControllerManagerNodeMonitorPeriodMilliseconds,
+			NodeMonitorGracePeriodMilliseconds: conf.KubeControllerManagerNodeMonitorGracePeriodMilliseconds,
+			ExtraArgs:                          kubeControllerManagerComponentPatches.ExtraArgs,
+			ExtraVolumes:                       kubeControllerManagerComponentPatches.ExtraVolumes,
 		})
 		if err != nil {
 			return err
@@ -254,14 +383,21 @@ func (c *Cluster) Install(ctx context.Context) error {
 			}
 		}
 
-		kubeSchedulerVersion, err := version.ParseFromImage(ctx, conf.Runtime, conf.KubeSchedulerImage, "kube-scheduler")
+		kubeSchedulerVersion, err := version.ParseFromImage(ctx, c.runtime, conf.KubeSchedulerImage, "kube-scheduler")
 		if err != nil {
 			return err
+		}
+
+		kubeSchedulerComponentPatches := runtime.GetComponentPatches(config, "kube-scheduler")
+		kubeSchedulerComponentPatches.ExtraVolumes, err = runtime.ExpandVolumesHostPaths(kubeSchedulerComponentPatches.ExtraVolumes)
+		if err != nil {
+			return fmt.Errorf("failed to expand host volumes for kube scheduler component: %w", err)
 		}
 		kubeSchedulerComponent, err := components.BuildKubeSchedulerComponent(components.BuildKubeSchedulerComponentConfig{
 			Workdir:          workdir,
 			Image:            conf.KubeSchedulerImage,
 			Version:          kubeSchedulerVersion,
+			BindAddress:      net.PublicAddress,
 			Port:             conf.KubeSchedulerPort,
 			SecurePort:       conf.SecurePort,
 			CaCertPath:       caCertPath,
@@ -270,6 +406,10 @@ func (c *Cluster) Install(ctx context.Context) error {
 			ConfigPath:       schedulerConfigPath,
 			KubeconfigPath:   inClusterOnHostKubeconfigPath,
 			KubeFeatureGates: conf.KubeFeatureGates,
+			Verbosity:        verbosity,
+			DisableQPSLimits: conf.DisableQPSLimits,
+			ExtraArgs:        kubeSchedulerComponentPatches.ExtraArgs,
+			ExtraVolumes:     kubeSchedulerComponentPatches.ExtraVolumes,
 		})
 		if err != nil {
 			return err
@@ -278,24 +418,38 @@ func (c *Cluster) Install(ctx context.Context) error {
 	}
 
 	// Configure the kwok-controller
-	kwokControllerVersion, err := version.ParseFromImage(ctx, conf.Runtime, conf.KwokControllerImage, "kwok")
+	kwokControllerVersion, err := version.ParseFromImage(ctx, c.runtime, conf.KwokControllerImage, "kwok")
 	if err != nil {
 		return err
 	}
-	kwokControllerComponent, err := components.BuildKwokControllerComponent(components.BuildKwokControllerComponentConfig{
-		Workdir:        workdir,
-		Image:          conf.KwokControllerImage,
-		Version:        kwokControllerVersion,
-		Port:           conf.KwokControllerPort,
-		ConfigPath:     kwokConfigPath,
-		KubeconfigPath: inClusterOnHostKubeconfigPath,
-		AdminCertPath:  adminCertPath,
-		AdminKeyPath:   adminKeyPath,
-		NodeName:       c.Name() + "-kwok-controller",
+
+	kwokControllerComponentPatches := runtime.GetComponentPatches(config, "kwok-controller")
+	kwokControllerComponentPatches.ExtraVolumes, err = runtime.ExpandVolumesHostPaths(kwokControllerComponentPatches.ExtraVolumes)
+	if err != nil {
+		return fmt.Errorf("failed to expand host volumes for kwok controller component: %w", err)
+	}
+
+	logVolumes := runtime.GetLogVolumes(ctx)
+	kwokControllerExtraVolumes := kwokControllerComponentPatches.ExtraVolumes
+	kwokControllerExtraVolumes = append(kwokControllerExtraVolumes, logVolumes...)
+
+	kwokControllerComponent := components.BuildKwokControllerComponent(components.BuildKwokControllerComponentConfig{
+		Workdir:                  workdir,
+		Image:                    conf.KwokControllerImage,
+		Version:                  kwokControllerVersion,
+		BindAddress:              net.PublicAddress,
+		Port:                     conf.KwokControllerPort,
+		ConfigPath:               kwokConfigPath,
+		KubeconfigPath:           inClusterOnHostKubeconfigPath,
+		CaCertPath:               caCertPath,
+		AdminCertPath:            adminCertPath,
+		AdminKeyPath:             adminKeyPath,
+		NodeName:                 c.Name() + "-kwok-controller",
+		Verbosity:                verbosity,
+		NodeLeaseDurationSeconds: conf.NodeLeaseDurationSeconds,
+		ExtraArgs:                kwokControllerComponentPatches.ExtraArgs,
+		ExtraVolumes:             kwokControllerExtraVolumes,
 	})
-	if err != nil {
-		return err
-	}
 	config.Components = append(config.Components, kwokControllerComponent)
 
 	// Configure the prometheus
@@ -305,6 +459,7 @@ func (c *Cluster) Install(ctx context.Context) error {
 			SecurePort:   conf.SecurePort,
 			AdminCrtPath: inClusterAdminCertPath,
 			AdminKeyPath: inClusterAdminKeyPath,
+			Metrics:      runtime.GetMetrics(ctx),
 		})
 		if err != nil {
 			return fmt.Errorf("failed to generate prometheus yaml: %w", err)
@@ -318,18 +473,28 @@ func (c *Cluster) Install(ctx context.Context) error {
 			return fmt.Errorf("failed to write prometheus yaml: %w", err)
 		}
 
-		prometheusVersion, err := version.ParseFromImage(ctx, conf.Runtime, conf.PrometheusImage, "")
+		prometheusVersion, err := version.ParseFromImage(ctx, c.runtime, conf.PrometheusImage, "")
 		if err != nil {
 			return err
+		}
+
+		prometheusComponentPatches := runtime.GetComponentPatches(config, "prometheus")
+		prometheusComponentPatches.ExtraVolumes, err = runtime.ExpandVolumesHostPaths(prometheusComponentPatches.ExtraVolumes)
+		if err != nil {
+			return fmt.Errorf("failed to expand host volumes for prometheus component: %w", err)
 		}
 		prometheusComponent, err := components.BuildPrometheusComponent(components.BuildPrometheusComponentConfig{
 			Workdir:       workdir,
 			Image:         conf.PrometheusImage,
 			Version:       prometheusVersion,
+			BindAddress:   net.PublicAddress,
 			Port:          conf.PrometheusPort,
 			ConfigPath:    prometheusConfigPath,
 			AdminCertPath: adminCertPath,
 			AdminKeyPath:  adminKeyPath,
+			Verbosity:     verbosity,
+			ExtraArgs:     prometheusComponentPatches.ExtraArgs,
+			ExtraVolumes:  prometheusComponentPatches.ExtraVolumes,
 		})
 		if err != nil {
 			return err
@@ -337,80 +502,104 @@ func (c *Cluster) Install(ctx context.Context) error {
 		config.Components = append(config.Components, prometheusComponent)
 	}
 
-	// Setup compose
-	compose := convertToCompose(c.Name(), config.Components)
-	composeData, err := yaml.Marshal(compose)
-	if err != nil {
-		return err
-	}
-
 	// Setup kubeconfig
-	kubeconfigData, err := k8s.BuildKubeconfig(k8s.BuildKubeconfigConfig{
+	kubeconfigData, err := kubeconfig.EncodeKubeconfig(kubeconfig.BuildKubeconfig(kubeconfig.BuildKubeconfigConfig{
 		ProjectName:  c.Name(),
 		SecurePort:   conf.SecurePort,
-		Address:      scheme + "://127.0.0.1:" + format.String(conf.KubeApiserverPort),
+		Address:      scheme + "://" + net.LocalAddress + ":" + format.String(conf.KubeApiserverPort),
+		CACrtPath:    caCertPath,
 		AdminCrtPath: adminCertPath,
 		AdminKeyPath: adminKeyPath,
-	})
+	}))
 	if err != nil {
 		return err
 	}
 
-	inClusterKubeconfigData, err := k8s.BuildKubeconfig(k8s.BuildKubeconfigConfig{
+	inClusterKubeconfigData, err := kubeconfig.EncodeKubeconfig(kubeconfig.BuildKubeconfig(kubeconfig.BuildKubeconfigConfig{
 		ProjectName:  c.Name(),
 		SecurePort:   conf.SecurePort,
 		Address:      scheme + "://" + c.Name() + "-kube-apiserver:" + format.String(inClusterPort),
+		CACrtPath:    inClusterCaCertPath,
 		AdminCrtPath: inClusterAdminCertPath,
 		AdminKeyPath: inClusterAdminKeyPath,
-	})
+	}))
 	if err != nil {
 		return err
+	}
+
+	isSelfCompose := c.isSelfCompose(ctx, true)
+	if !isSelfCompose {
+		composePath := c.GetWorkdirPath(runtime.ComposeName)
+		compose := convertToCompose(c.Name(), conf.BindAddress, config.Components)
+		composeData, err := yaml.Marshal(compose)
+		if err != nil {
+			return err
+		}
+		err = os.WriteFile(composePath, composeData, 0640)
+		if err != nil {
+			return err
+		}
 	}
 
 	// Save config
-	err = os.WriteFile(kubeconfigPath, []byte(kubeconfigData), 0640)
+	err = os.WriteFile(kubeconfigPath, kubeconfigData, 0640)
 	if err != nil {
 		return err
 	}
 
-	err = os.WriteFile(inClusterOnHostKubeconfigPath, []byte(inClusterKubeconfigData), 0640)
+	err = os.WriteFile(inClusterOnHostKubeconfigPath, inClusterKubeconfigData, 0640)
 	if err != nil {
 		return err
 	}
 
-	err = os.WriteFile(composePath, composeData, 0640)
-	if err != nil {
-		return err
-	}
-
-	// set the context in default kubeconfig
-	_ = c.Kubectl(ctx, exec.IOStreams{}, "config", "set", "clusters."+c.Name()+".server", scheme+"://127.0.0.1:"+format.String(conf.KubeApiserverPort))
-	_ = c.Kubectl(ctx, exec.IOStreams{}, "config", "set", "contexts."+c.Name()+".cluster", c.Name())
-	if conf.SecurePort {
-		_ = c.Kubectl(ctx, exec.IOStreams{}, "config", "set", "clusters."+c.Name()+".insecure-skip-tls-verify", "true")
-		_ = c.Kubectl(ctx, exec.IOStreams{}, "config", "set", "contexts."+c.Name()+".user", c.Name())
-		_ = c.Kubectl(ctx, exec.IOStreams{}, "config", "set", "users."+c.Name()+".client-certificate", adminCertPath)
-		_ = c.Kubectl(ctx, exec.IOStreams{}, "config", "set", "users."+c.Name()+".client-key", adminKeyPath)
-	}
-
-	logger := log.FromContext(ctx)
 	err = c.SetConfig(ctx, config)
 	if err != nil {
-		logger.Error("Failed to set config", err)
+		return err
 	}
 	err = c.Save(ctx)
 	if err != nil {
-		logger.Error("Failed to update cluster", err)
+		return err
 	}
 
+	if isSelfCompose {
+		err = c.createNetwork(ctx)
+		if err != nil {
+			return err
+		}
+
+		err = wait.Poll(ctx, func(ctx context.Context) (bool, error) {
+			err = c.createComponents(ctx)
+			return err == nil, err
+		},
+			wait.WithContinueOnError(5),
+			wait.WithImmediate(),
+		)
+		if err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
+// Uninstall uninstalls the cluster.
 func (c *Cluster) Uninstall(ctx context.Context) error {
-	// unset the context in default kubeconfig
-	_ = c.Kubectl(ctx, exec.IOStreams{}, "config", "unset", "clusters."+c.Name())
-	_ = c.Kubectl(ctx, exec.IOStreams{}, "config", "unset", "users."+c.Name())
-	_ = c.Kubectl(ctx, exec.IOStreams{}, "config", "unset", "contexts."+c.Name())
+	if c.isSelfCompose(ctx, false) {
+		err := wait.Poll(ctx, func(ctx context.Context) (bool, error) {
+			err := c.deleteComponents(ctx)
+			return err == nil, err
+		},
+			wait.WithContinueOnError(5),
+			wait.WithImmediate(),
+		)
+		if err != nil {
+			return err
+		}
+
+		err = c.deleteNetwork(ctx)
+		if err != nil {
+			return err
+		}
+	}
 
 	err := c.Cluster.Uninstall(ctx)
 	if err != nil {
@@ -419,255 +608,208 @@ func (c *Cluster) Uninstall(ctx context.Context) error {
 	return nil
 }
 
+// Up starts the cluster.
 func (c *Cluster) Up(ctx context.Context) error {
-	config, err := c.Config(ctx)
-	if err != nil {
-		return err
+	if c.isSelfCompose(ctx, false) {
+		return c.start(ctx)
 	}
-	conf := &config.Options
-
-	args := []string{"up", "-d"}
-	if conf.QuietPull {
-		args = append(args, "--quiet-pull")
-	}
-
-	commands, err := c.buildComposeCommands(ctx, args...)
-	if err != nil {
-		return err
-	}
-
-	logger := log.FromContext(ctx)
-	for i := 0; ctx.Err() == nil; i++ {
-		err = exec.Exec(ctx, c.Workdir(), exec.IOStreams{
-			ErrOut: os.Stderr,
-			Out:    os.Stderr,
-		}, commands[0], commands[1:]...)
-		if err != nil {
-			logger.Debug("Failed to start cluster",
-				"times", i,
-				"err", err,
-			)
-			time.Sleep(time.Second)
-			continue
-		}
-		ready, err := c.isRunning(ctx)
-		if err != nil {
-			logger.Debug("Failed to check components status",
-				"times", i,
-				"err", err,
-			)
-			time.Sleep(time.Second)
-			continue
-		}
-		if !ready {
-			time.Sleep(time.Second)
-			continue
-		}
-		break
-	}
-	err = ctx.Err()
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return c.upCompose(ctx)
 }
 
-type statusItem struct {
-	Service string
-	State   string
-}
-
-func (c *Cluster) isRunning(ctx context.Context) (bool, error) {
-	commands, err := c.buildComposeCommands(ctx, "ps", "--format=json")
-	if err != nil {
-		return false, err
-	}
-	out := bytes.NewBuffer(nil)
-	err = exec.Exec(ctx, c.Workdir(), exec.IOStreams{
-		Out: out,
-	}, commands[0], commands[1:]...)
-	if err != nil {
-		return false, err
-	}
-
-	var data []statusItem
-	err = json.Unmarshal(out.Bytes(), &data)
-	if err != nil {
-		return false, err
-	}
-
-	if len(data) == 0 {
-		logger := log.FromContext(ctx)
-		logger.Debug("No components found")
-		return false, nil
-	}
-
-	components, ok := slices.Find(data, func(i statusItem) bool {
-		return i.State != "running"
-	})
-	if ok {
-		logger := log.FromContext(ctx)
-		logger.Debug("Components not all running",
-			"components", components,
-		)
-		return false, nil
-	}
-	return true, nil
-}
-
+// Down stops the cluster
 func (c *Cluster) Down(ctx context.Context) error {
-	logger := log.FromContext(ctx)
-	args := []string{"down"}
-	commands, err := c.buildComposeCommands(ctx, args...)
-	if err != nil {
-		return err
+	if c.isSelfCompose(ctx, false) {
+		return c.stop(ctx)
 	}
-
-	err = exec.Exec(ctx, c.Workdir(), exec.IOStreams{
-		ErrOut: os.Stderr,
-		Out:    os.Stderr,
-	}, commands[0], commands[1:]...)
-	if err != nil {
-		logger.Error("Failed to down cluster", err)
-	}
-	return nil
+	return c.downCompose(ctx)
 }
 
+// Start starts the cluster
 func (c *Cluster) Start(ctx context.Context) error {
-	conf, err := c.Config(ctx)
-	if err != nil {
-		return err
+	if c.isSelfCompose(ctx, false) {
+		return c.start(ctx)
 	}
-
-	// TODO: nerdctl does not support 'compose start' in v1.1.0 or earlier
-	// Support in https://github.com/containerd/nerdctl/pull/1656 merge into the main branch, but there is no release
-	subcommand := []string{"start"}
-	if conf.Options.Runtime == consts.RuntimeTypeNerdctl {
-		subcommand = []string{"up", "-d"}
-	}
-
-	commands, err := c.buildComposeCommands(ctx, subcommand...)
-	if err != nil {
-		return err
-	}
-
-	err = exec.Exec(ctx, c.Workdir(), exec.IOStreams{
-		ErrOut: os.Stderr,
-		Out:    os.Stderr,
-	}, commands[0], commands[1:]...)
-	if err != nil {
-		return fmt.Errorf("failed to start cluster: %w", err)
-	}
-
-	if conf.Options.Runtime == consts.RuntimeTypeNerdctl {
-		backupFilename := c.GetWorkdirPath("restart.db")
-		fi, err := os.Stat(backupFilename)
-		if err == nil {
-			if fi.IsDir() {
-				return fmt.Errorf("wrong backup file %s, it cannot be a directory, please remove it", backupFilename)
-			}
-			if err := c.SnapshotRestore(ctx, backupFilename); err != nil {
-				return fmt.Errorf("failed to restore cluster data: %w", err)
-			}
-			if err := os.Remove(backupFilename); err != nil {
-				return fmt.Errorf("failed to remove backup file: %w", err)
-			}
-		} else if !os.IsNotExist(err) {
-			return err
-		}
-	}
-
-	return nil
+	return c.startCompose(ctx)
 }
 
+// Stop stops the cluster
 func (c *Cluster) Stop(ctx context.Context) error {
-	conf, err := c.Config(ctx)
-	if err != nil {
-		return err
+	if c.isSelfCompose(ctx, false) {
+		return c.stop(ctx)
 	}
+	return c.stopCompose(ctx)
+}
 
-	// TODO: nerdctl does not support 'compose stop' in v1.0.0 or earlier
-	subcommand := "stop"
-	if conf.Options.Runtime == consts.RuntimeTypeNerdctl {
-		subcommand = "down"
-		err := c.SnapshotSave(ctx, c.GetWorkdirPath("restart.db"))
-		if err != nil {
-			return fmt.Errorf("failed to snapshot cluster data: %w", err)
+func (c *Cluster) start(ctx context.Context) error {
+	if c.runtime == consts.RuntimeTypeNerdctl {
+		canNerdctlUnlessStopped, _ := c.isCanNerdctlUnlessStopped(ctx)
+		if !canNerdctlUnlessStopped {
+			// TODO: Remove this, nerdctl stop will restart containers
+			// https://github.com/containerd/nerdctl/issues/1980
+			err := c.createComponents(ctx)
+			if err != nil {
+				return err
+			}
 		}
 	}
-
-	commands, err := c.buildComposeCommands(ctx, subcommand)
+	err := wait.Poll(ctx, func(ctx context.Context) (bool, error) {
+		err := c.startComponents(ctx)
+		return err == nil, err
+	},
+		wait.WithContinueOnError(5),
+		wait.WithImmediate(),
+	)
 	if err != nil {
 		return err
 	}
 
-	err = exec.Exec(ctx, c.Workdir(), exec.IOStreams{
-		ErrOut: os.Stderr,
-		Out:    os.Stderr,
-	}, commands[0], commands[1:]...)
-	if err != nil {
-		return fmt.Errorf("failed to stop cluster: %w", err)
+	if c.runtime == consts.RuntimeTypeNerdctl {
+		canNerdctlUnlessStopped, _ := c.isCanNerdctlUnlessStopped(ctx)
+		if !canNerdctlUnlessStopped {
+			backupFilename := c.GetWorkdirPath("restart.db")
+			fi, err := os.Stat(backupFilename)
+			if err == nil {
+				if fi.IsDir() {
+					return fmt.Errorf("wrong backup file %s, it cannot be a directory, please remove it", backupFilename)
+				}
+				if err := c.SnapshotRestore(ctx, backupFilename); err != nil {
+					return fmt.Errorf("failed to restore cluster data: %w", err)
+				}
+				if err := os.Remove(backupFilename); err != nil {
+					return fmt.Errorf("failed to remove backup file: %w", err)
+				}
+			} else if !os.IsNotExist(err) {
+				return err
+			}
+		}
 	}
 	return nil
 }
 
-func (c *Cluster) StartComponent(ctx context.Context, name string) error {
-	config, err := c.Config(ctx)
+func (c *Cluster) stop(ctx context.Context) error {
+	if c.runtime == consts.RuntimeTypeNerdctl {
+		canNerdctlUnlessStopped, _ := c.isCanNerdctlUnlessStopped(ctx)
+		if !canNerdctlUnlessStopped {
+			err := c.SnapshotSave(ctx, c.GetWorkdirPath("restart.db"))
+			if err != nil {
+				return fmt.Errorf("failed to snapshot cluster data: %w", err)
+			}
+		}
+	}
+	err := wait.Poll(ctx, func(ctx context.Context) (bool, error) {
+		err := c.stopComponents(ctx)
+		return err == nil, err
+	},
+		wait.WithContinueOnError(5),
+		wait.WithImmediate(),
+	)
 	if err != nil {
 		return err
 	}
-	conf := &config.Options
-
-	err = exec.Exec(ctx, c.Workdir(), exec.IOStreams{}, conf.Runtime, "start", c.Name()+"-"+name)
-	if err != nil {
-		return err
+	if c.runtime == consts.RuntimeTypeNerdctl {
+		canNerdctlUnlessStopped, _ := c.isCanNerdctlUnlessStopped(ctx)
+		if !canNerdctlUnlessStopped {
+			// TODO: Remove this, nerdctl stop will restart containers
+			// https://github.com/containerd/nerdctl/issues/1980
+			err = c.deleteComponents(ctx)
+			if err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }
 
-func (c *Cluster) StopComponent(ctx context.Context, name string) error {
-	config, err := c.Config(ctx)
-	if err != nil {
-		return err
-	}
-	conf := &config.Options
+// StartComponent starts a component in the cluster
+func (c *Cluster) StartComponent(ctx context.Context, componentName string) error {
+	return c.startComponent(ctx, componentName)
+}
 
-	err = exec.Exec(ctx, c.Workdir(), exec.IOStreams{}, conf.Runtime, "stop", c.Name()+"-"+name)
-	if err != nil {
-		return err
-	}
-	return nil
+// StopComponent stops a component in the cluster
+func (c *Cluster) StopComponent(ctx context.Context, componentName string) error {
+	return c.stopComponent(ctx, componentName)
 }
 
 func (c *Cluster) logs(ctx context.Context, name string, out io.Writer, follow bool) error {
-	config, err := c.Config(ctx)
-	if err != nil {
-		return err
-	}
-	conf := &config.Options
-
 	args := []string{"logs"}
 	if follow {
 		args = append(args, "-f")
 	}
 	args = append(args, c.Name()+"-"+name)
-	err = exec.Exec(ctx, c.Workdir(), exec.IOStreams{
-		ErrOut: out,
-		Out:    out,
-	}, conf.Runtime, args...)
+	err := exec.Exec(exec.WithAllWriteTo(exec.WithDir(ctx, c.Workdir()), out), c.runtime, args...)
 	if err != nil {
 		return err
 	}
 	return nil
 }
 
+// Logs returns the logs of the specified component.
 func (c *Cluster) Logs(ctx context.Context, name string, out io.Writer) error {
 	return c.logs(ctx, name, out, false)
 }
 
+// LogsFollow follows the logs of the component
 func (c *Cluster) LogsFollow(ctx context.Context, name string, out io.Writer) error {
 	return c.logs(ctx, name, out, true)
+}
+
+// CollectLogs returns the logs of the specified component.
+func (c *Cluster) CollectLogs(ctx context.Context, name string, dir string) error {
+	conf, err := c.Config(ctx)
+	if err != nil {
+		return err
+	}
+
+	err = exec.WriteToPath(ctx, filepath.Join(dir, c.runtime+"-info.txt"), []string{c.runtime, "info"})
+	if err != nil {
+		return err
+	}
+
+	componentsDir := filepath.Join(dir, "components")
+	logger := log.FromContext(ctx)
+	for _, component := range conf.Components {
+		path := filepath.Join(componentsDir, component.Name+".log")
+		f, err := file.Open(path, 0640)
+		if err != nil {
+			logger.Error("Failed to open file", err)
+			continue
+		}
+		if err = c.Logs(ctx, component.Name, f); err != nil {
+			logger.Error("Failed to get log", err)
+			if err = f.Close(); err != nil {
+				logger.Error("Failed to close file", err)
+				if err = os.Remove(path); err != nil {
+					logger.Error("Failed to remove file", err)
+				}
+			}
+		}
+		if err = f.Close(); err != nil {
+			logger.Error("Failed to close file", err)
+			if err = os.Remove(path); err != nil {
+				logger.Error("Failed to remove file", err)
+			}
+		}
+	}
+
+	if conf.Options.KubeAuditPolicy != "" {
+		filePath := filepath.Join(componentsDir, "audit.log")
+		f, err := file.Open(filePath, 0640)
+		if err != nil {
+			logger.Error("Failed to open file", err)
+		} else {
+			if err = c.AuditLogs(ctx, f); err != nil {
+				logger.Error("Failed to get audit log", err)
+			}
+			if err = f.Close(); err != nil {
+				logger.Error("Failed to close file", err)
+				if err = os.Remove(filePath); err != nil {
+					logger.Error("Failed to remove file", err)
+				}
+			}
+		}
+	}
+
+	return nil
 }
 
 // ListBinaries list binaries in the cluster
@@ -701,38 +843,57 @@ func (c *Cluster) ListImages(ctx context.Context) ([]string, error) {
 	}, nil
 }
 
-// buildComposeCommands returns the compose commands with given current runtime and args
-func (c *Cluster) buildComposeCommands(ctx context.Context, args ...string) ([]string, error) {
-	config, err := c.Config(ctx)
-	if err != nil {
-		return nil, err
-	}
-	conf := &config.Options
+// EtcdctlInCluster implements the ectdctl subcommand
+func (c *Cluster) EtcdctlInCluster(ctx context.Context, args ...string) error {
+	etcdContainerName := c.Name() + "-etcd"
 
-	if conf.Runtime == consts.RuntimeTypeDocker {
-		err := exec.Exec(ctx, "", exec.IOStreams{}, conf.Runtime, "compose", "version")
-		if err != nil {
-			// docker compose subcommand does not exist, try to download it
-			dockerComposePath := c.GetBinPath("docker-compose" + conf.BinSuffix)
-			err = file.DownloadWithCache(ctx, conf.CacheDir, conf.DockerComposeBinary, dockerComposePath, 0755, conf.QuietPull)
-			if err != nil {
-				return nil, err
-			}
-			return append([]string{dockerComposePath}, args...), nil
-		}
-	}
-	return append([]string{conf.Runtime, "compose"}, args...), nil
+	// If using versions earlier than v3.4, set `ETCDCTL_API=3` to use v3 API.
+	args = append([]string{"exec", "--env=ETCDCTL_API=3", "-i", etcdContainerName, "etcdctl"}, args...)
+	return exec.Exec(ctx, c.runtime, args...)
 }
 
-// EtcdctlInCluster implements the ectdctl subcommand
-func (c *Cluster) EtcdctlInCluster(ctx context.Context, stm exec.IOStreams, args ...string) error {
+// Ready returns true if the cluster is ready
+func (c *Cluster) Ready(ctx context.Context) (bool, error) {
 	config, err := c.Config(ctx)
+	if err != nil {
+		return false, err
+	}
+
+	for _, component := range config.Components {
+		if running, _ := c.inspectComponent(ctx, component.Name); !running {
+			return false, nil
+		}
+	}
+
+	return c.Cluster.Ready(ctx)
+}
+
+// WaitReady waits for the cluster to be ready.
+func (c *Cluster) WaitReady(ctx context.Context, timeout time.Duration) error {
+	var (
+		err     error
+		waitErr error
+		ready   bool
+	)
+	logger := log.FromContext(ctx)
+	waitErr = wait.Poll(ctx, func(ctx context.Context) (bool, error) {
+		ready, err = c.Ready(ctx)
+		if err != nil {
+			logger.Debug("Cluster is not ready",
+				"err", err,
+			)
+		}
+		return ready, nil
+	},
+		wait.WithTimeout(timeout),
+		wait.WithContinueOnError(10),
+		wait.WithInterval(time.Second/2),
+	)
 	if err != nil {
 		return err
 	}
-	conf := &config.Options
-
-	etcdContainerName := c.Name() + "-etcd"
-
-	return exec.Exec(ctx, "", stm, conf.Runtime, append([]string{"exec", "-i", etcdContainerName, "etcdctl"}, args...)...)
+	if waitErr != nil {
+		return waitErr
+	}
+	return nil
 }

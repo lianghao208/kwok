@@ -49,9 +49,9 @@ function args() {
         exit 0
         ;;
       --skip | --skip=*)
-        [[ "${arg#*=}" != "${arg}" ]] && SKIPS+=("${arg#*=}") || { SKIPS+=("${2}") && shift; }
+        [[ "${arg#*=}" != "${arg}" ]] && SKIPS+=("${arg#*=}") || { SKIPS+=("${2}") && shift; } || :
         shift
-      ;;
+        ;;
       -*)
         echo "Error: Unknown argument: ${arg}"
         usage
@@ -65,9 +65,7 @@ function args() {
     done
   fi
   if [[ "${#TARGETS[@]}" == 0 ]]; then
-    TARGETS=(
-      $(all_cases)
-    )
+    mapfile -t TARGETS < <(all_cases)
   fi
 }
 

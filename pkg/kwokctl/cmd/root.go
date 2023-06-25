@@ -23,16 +23,17 @@ import (
 	"github.com/spf13/cobra"
 
 	"sigs.k8s.io/kwok/pkg/config"
-	"sigs.k8s.io/kwok/pkg/consts"
 	"sigs.k8s.io/kwok/pkg/kwokctl/cmd/create"
 	del "sigs.k8s.io/kwok/pkg/kwokctl/cmd/delete"
 	"sigs.k8s.io/kwok/pkg/kwokctl/cmd/etcdctl"
+	"sigs.k8s.io/kwok/pkg/kwokctl/cmd/export"
 	"sigs.k8s.io/kwok/pkg/kwokctl/cmd/get"
 	"sigs.k8s.io/kwok/pkg/kwokctl/cmd/kubectl"
 	"sigs.k8s.io/kwok/pkg/kwokctl/cmd/logs"
 	"sigs.k8s.io/kwok/pkg/kwokctl/cmd/snapshot"
 	"sigs.k8s.io/kwok/pkg/kwokctl/cmd/start"
 	"sigs.k8s.io/kwok/pkg/kwokctl/cmd/stop"
+	"sigs.k8s.io/kwok/pkg/utils/version"
 )
 
 // NewCommand returns a new cobra.Command for root
@@ -40,9 +41,8 @@ func NewCommand(ctx context.Context) *cobra.Command {
 	cmd := &cobra.Command{
 		Args:          cobra.NoArgs,
 		Use:           "kwokctl [command]",
-		Short:         "Kwokctl is a Kwok cluster management tool",
-		Long:          "Kwokctl is a Kwok cluster management tool",
-		Version:       consts.Version,
+		Short:         "kwokctl is a tool to streamline the creation and management of clusters, with nodes simulated by kwok",
+		Version:       version.DisplayVersion(),
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -63,6 +63,7 @@ func NewCommand(ctx context.Context) *cobra.Command {
 		etcdctl.NewCommand(ctx),
 		logs.NewCommand(ctx),
 		snapshot.NewCommand(ctx),
+		export.NewCommand(ctx),
 	)
 	return cmd
 }

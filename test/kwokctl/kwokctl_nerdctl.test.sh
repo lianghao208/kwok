@@ -21,10 +21,11 @@ source "${DIR}/helper.sh"
 
 function main() {
   local all_releases=("${@}")
-  build_kwokctl
-  build_image_for_nerdctl
 
   test_all "nerdctl" "workable" "${all_releases[@]}" || exit 1
 }
 
-main $(supported_releases)
+requirements_for_nerdctl
+
+mapfile -t releases < <(supported_releases)
+main "${releases[@]}"

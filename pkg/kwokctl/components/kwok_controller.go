@@ -18,36 +18,53 @@ package components
 
 import (
 	"sigs.k8s.io/kwok/pkg/apis/internalversion"
+	"sigs.k8s.io/kwok/pkg/log"
 	"sigs.k8s.io/kwok/pkg/utils/format"
 	"sigs.k8s.io/kwok/pkg/utils/version"
 )
 
+// BuildKwokControllerComponentConfig is the configuration for building a kwok controller component.
 type BuildKwokControllerComponentConfig struct {
-	Binary         string
-	Image          string
-	Version        version.Version
-	Workdir        string
-	Port           uint32
-	ConfigPath     string
-	KubeconfigPath string
-	AdminCertPath  string
-	AdminKeyPath   string
-	NodeName       string
+	Binary                   string
+	Image                    string
+	Version                  version.Version
+	Workdir                  string
+	BindAddress              string
+	Port                     uint32
+	ConfigPath               string
+	KubeconfigPath           string
+	CaCertPath               string
+	AdminCertPath            string
+	AdminKeyPath             string
+	NodeName                 string
+	Verbosity                log.Level
+	NodeLeaseDurationSeconds uint
+	ExtraArgs                []internalversion.ExtraArgs
+	ExtraVolumes             []internalversion.Volume
 }
 
-func BuildKwokControllerComponent(conf BuildKwokControllerComponentConfig) (component internalversion.Component, err error) {
+// BuildKwokControllerComponent builds a kwok controller component.
+func BuildKwokControllerComponent(conf BuildKwokControllerComponentConfig) (component internalversion.Component) {
 	kwokControllerArgs := []string{
 		"--manage-all-nodes=true",
 	}
+	kwokControllerArgs = append(kwokControllerArgs, extraArgsToStrings(conf.ExtraArgs)...)
 
 	inContainer := conf.Image != ""
 	var volumes []internalversion.Volume
+	volumes = append(volumes, conf.ExtraVolumes...)
+	var ports []internalversion.Port
 
 	if inContainer {
 		volumes = append(volumes,
 			internalversion.Volume{
 				HostPath:  conf.KubeconfigPath,
 				MountPath: "/root/.kube/config",
+				ReadOnly:  true,
+			},
+			internalversion.Volume{
+				HostPath:  conf.CaCertPath,
+				MountPath: "/etc/kubernetes/pki/ca.crt",
 				ReadOnly:  true,
 			},
 			internalversion.Volume{
@@ -66,6 +83,15 @@ func BuildKwokControllerComponent(conf BuildKwokControllerComponentConfig) (comp
 				ReadOnly:  true,
 			},
 		)
+
+		if conf.Port != 0 {
+			ports = append(ports,
+				internalversion.Port{
+					HostPort: conf.Port,
+					Port:     10247,
+				},
+			)
+		}
 		kwokControllerArgs = append(kwokControllerArgs,
 			"--kubeconfig=/root/.kube/config",
 			"--config=/root/.kwok/kwok.yaml",
@@ -73,6 +99,8 @@ func BuildKwokControllerComponent(conf BuildKwokControllerComponentConfig) (comp
 			"--tls-private-key-file=/etc/kubernetes/pki/admin.key",
 			"--node-name="+conf.NodeName,
 			"--node-port=10247",
+			"--server-address="+conf.BindAddress+":10247",
+			"--node-lease-duration-seconds="+format.String(conf.NodeLeaseDurationSeconds),
 		)
 	} else {
 		kwokControllerArgs = append(kwokControllerArgs,
@@ -82,7 +110,13 @@ func BuildKwokControllerComponent(conf BuildKwokControllerComponentConfig) (comp
 			"--tls-private-key-file="+conf.AdminKeyPath,
 			"--node-name=localhost",
 			"--node-port="+format.String(conf.Port),
+			"--server-address="+conf.BindAddress+":"+format.String(conf.Port),
+			"--node-lease-duration-seconds="+format.String(conf.NodeLeaseDurationSeconds),
 		)
+	}
+
+	if conf.Verbosity != log.LevelInfo {
+		kwokControllerArgs = append(kwokControllerArgs, "--v="+format.String(conf.Verbosity))
 	}
 
 	return internalversion.Component{
@@ -91,11 +125,12 @@ func BuildKwokControllerComponent(conf BuildKwokControllerComponentConfig) (comp
 		Links: []string{
 			"kube-apiserver",
 		},
+		Ports:   ports,
 		Command: []string{"kwok"},
 		Volumes: volumes,
 		Args:    kwokControllerArgs,
 		Binary:  conf.Binary,
 		Image:   conf.Image,
 		WorkDir: conf.Workdir,
-	}, nil
+	}
 }

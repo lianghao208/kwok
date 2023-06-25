@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Package stop implements the stop command
 package stop
 
 import (
@@ -28,9 +29,8 @@ import (
 func NewCommand(ctx context.Context) *cobra.Command {
 	cmd := &cobra.Command{
 		Args:  cobra.NoArgs,
-		Use:   "stop",
+		Use:   "stop [command]",
 		Short: "Stop one of [cluster]",
-		Long:  "Stop one of [cluster]",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return cmd.Help()
 		},

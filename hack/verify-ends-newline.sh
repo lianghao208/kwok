@@ -17,17 +17,26 @@ set -o errexit
 set -o nounset
 set -o pipefail
 
-ROOT_DIR="$(dirname "${BASH_SOURCE[0]}")/.."
+DIR="$(dirname "${BASH_SOURCE[0]}")"
+
+ROOT_DIR="$(realpath "${DIR}/..")"
 
 function check_ends() {
-  find . \
+  find . \( \
     -iname "*.md" \
     -o -iname "*.sh" \
     -o -iname "*.go" \
     -o -iname "*.tpl" \
     -o -iname "*.yaml" \
-    -o -iname "*.yml" |
-    xargs -I {} bash -c "[ -n \"\$(tail -c 1 {})\" ] && echo {}" || :
+    -o -iname "*.yml" \
+    \) \
+    -not \( \
+    -path ./.git/\* \
+    -o -path ./vendor/\* \
+    -o -path ./demo/node_modules/\* \
+    -o -path ./site/themes/\* \
+    \) \
+    -exec sh -c '[ -n "$(tail -c 1 "$1")" ] && echo "$1"' sh {} \;
 }
 
 function check() {
@@ -39,6 +48,4 @@ function check() {
   fi
 }
 
-cd "${ROOT_DIR}"
-
-check || exit 1
+cd "${ROOT_DIR}" && check

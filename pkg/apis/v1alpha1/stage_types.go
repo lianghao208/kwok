@@ -21,6 +21,7 @@ import (
 )
 
 const (
+	// StageKind is the kind of the Stage resource.
 	StageKind = "Stage"
 )
 
@@ -28,6 +29,7 @@ const (
 
 // Stage is an API that describes the staged change of a resource
 type Stage struct {
+	//+k8s:conversion-gen=false
 	metav1.TypeMeta `json:",inline"`
 	// Standard list metadata.
 	// More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata
@@ -50,6 +52,8 @@ type StageSpec struct {
 	Delay *StageDelay `json:"delay,omitempty"`
 	// Next indicates that this stage will be moved to.
 	Next StageNext `json:"next"`
+	// ImmediateNextStage means that the next stage of matching is performed immediately, without waiting for the Apiserver to push.
+	ImmediateNextStage *bool `json:"immediateNextStage,omitempty"`
 }
 
 // StageResourceRef specifies the kind and version of the resource.
@@ -63,19 +67,19 @@ type StageResourceRef struct {
 
 // StageDelay describes the delay time before going to next.
 type StageDelay struct {
-	// Duration indicates the stage delay time.
-	// If JitterDuration is less than Duration, then JitterDuration is used.
-	Duration metav1.Duration `json:"duration"`
+	// DurationMilliseconds indicates the stage delay time.
+	// If JitterDurationMilliseconds is less than DurationMilliseconds, then JitterDurationMilliseconds is used.
+	DurationMilliseconds *int64 `json:"durationMilliseconds,omitempty"`
 	// DurationFrom is the expression used to get the value.
-	// If it is a time.Time type, getting the value will be minus time.Now() to get Duration
+	// If it is a time.Time type, getting the value will be minus time.Now() to get DurationMilliseconds
 	// If it is a string type, the value get will be parsed by time.ParseDuration.
 	DurationFrom *ExpressionFromSource `json:"durationFrom,omitempty"`
 
-	// JitterDuration is the duration plus an additional amount chosen uniformly
-	// at random from the interval between Duration and JitterDuration.
-	JitterDuration *metav1.Duration `json:"jitterDuration,omitempty"`
+	// JitterDurationMilliseconds is the duration plus an additional amount chosen uniformly
+	// at random from the interval between DurationMilliseconds and JitterDurationMilliseconds.
+	JitterDurationMilliseconds *int64 `json:"jitterDurationMilliseconds,omitempty"`
 	// JitterDurationFrom is the expression used to get the value.
-	// If it is a time.Time type, getting the value will be minus time.Now() to get JitterDuration
+	// If it is a time.Time type, getting the value will be minus time.Now() to get JitterDurationMilliseconds
 	// If it is a string type, the value get will be parsed by time.ParseDuration.
 	JitterDurationFrom *ExpressionFromSource `json:"jitterDurationFrom,omitempty"`
 }
@@ -104,6 +108,7 @@ type StageFinalizers struct {
 
 // FinalizerItem  describes the one of the finalizers.
 type FinalizerItem struct {
+	// Value is the value of the finalizer.
 	Value string `json:"value,omitempty"`
 }
 
@@ -147,12 +152,18 @@ type SelectorRequirement struct {
 }
 
 // SelectorOperator is a label selector operator is the set of operators that can be used in a selector requirement.
+// +enum
 type SelectorOperator string
 
-var (
-	SelectorOpIn           SelectorOperator = "In"
-	SelectorOpNotIn        SelectorOperator = "NotIn"
-	SelectorOpExists       SelectorOperator = "Exists"
+// The following are valid selector operators.
+const (
+	// SelectorOpIn is the set inclusion operator.
+	SelectorOpIn SelectorOperator = "In"
+	// SelectorOpNotIn is the negated set inclusion operator.
+	SelectorOpNotIn SelectorOperator = "NotIn"
+	// SelectorOpExists is the existence operator.
+	SelectorOpExists SelectorOperator = "Exists"
+	// SelectorOpDoesNotExist is the negated existence operator.
 	SelectorOpDoesNotExist SelectorOperator = "DoesNotExist"
 )
 

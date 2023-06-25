@@ -2,9 +2,9 @@ timeout: 3600s
 options:
   substitution_option: ALLOW_LOOSE
   # job builds a multi-arch docker image for amd64,arm,arm64 and s390x.
-  machineType: N1_HIGHCPU_32
+  machineType: E2_HIGHCPU_32
 steps:
-  - name: "gcr.io/k8s-staging-test-infra/gcb-docker-gcloud:v20221007-ad65926f6b"
+  - name: "gcr.io/k8s-staging-test-infra/gcb-docker-gcloud:v20230424-910a2a439d"
     entrypoint: "bash"
     env:
       - DOCKER_CLI_EXPERIMENTAL=enabled
@@ -15,6 +15,8 @@ steps:
       - STAGING=true
       - STAGING_IMAGE_PREFIX=gcr.io/k8s-staging-kwok
       - IMAGE_PREFIX=registry.k8s.io/kwok
+      - NUMBER_SUPPORTED_KUBE_RELEASES=6
+      - PRE_RELEASE=GA
     args:
       - -c
       - |
@@ -25,6 +27,6 @@ substitutions:
   # _GIT_TAG will be filled with a git-based tag for the image, of the form vYYYYMMDD-hash, and
   # can be used as a substitution
   _GIT_TAG: "12345"
-  # _PULL_BASE_REF will contain the ref that was pushed to to trigger this build -
+  # _PULL_BASE_REF will contain the ref that was pushed to trigger this build -
   # a branch like 'main' or 'release-0.2', or a tag like 'v0.2'.
   _PULL_BASE_REF: "main"

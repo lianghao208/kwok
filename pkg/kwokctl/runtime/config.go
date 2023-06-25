@@ -22,10 +22,13 @@ import (
 	"time"
 
 	"sigs.k8s.io/kwok/pkg/apis/internalversion"
-	"sigs.k8s.io/kwok/pkg/utils/exec"
 )
 
+// Runtime is the interface for a runtime.
 type Runtime interface {
+	// Available checks whether the runtime is available.
+	Available(ctx context.Context) error
+
 	// SetConfig sets the config of cluster
 	SetConfig(ctx context.Context, conf *internalversion.KwokctlConfiguration) error
 
@@ -68,23 +71,29 @@ type Runtime interface {
 	// WaitReady wait the cluster is ready
 	WaitReady(ctx context.Context, timeout time.Duration) error
 
-	// InHostKubeconfig return the kubeconfig in host
-	InHostKubeconfig() (string, error)
+	// AddContext add the context of cluster to kubeconfig
+	AddContext(ctx context.Context, kubeconfigPath string) error
+
+	// RemoveContext remove the context of cluster from kubeconfig
+	RemoveContext(ctx context.Context, kubeconfigPath string) error
 
 	// Kubectl command
-	Kubectl(ctx context.Context, stm exec.IOStreams, args ...string) error
+	Kubectl(ctx context.Context, args ...string) error
 
 	// KubectlInCluster command in cluster
-	KubectlInCluster(ctx context.Context, stm exec.IOStreams, args ...string) error
+	KubectlInCluster(ctx context.Context, args ...string) error
 
 	// EtcdctlInCluster command in cluster
-	EtcdctlInCluster(ctx context.Context, stm exec.IOStreams, args ...string) error
+	EtcdctlInCluster(ctx context.Context, args ...string) error
 
 	// Logs logs of a component
 	Logs(ctx context.Context, name string, out io.Writer) error
 
 	// LogsFollow follow logs of a component with follow
 	LogsFollow(ctx context.Context, name string, out io.Writer) error
+
+	// CollectLogs will populate dir with cluster logs and other debug files
+	CollectLogs(ctx context.Context, name string, dir string) error
 
 	// AuditLogs audit logs of apiserver
 	AuditLogs(ctx context.Context, out io.Writer) error
@@ -103,4 +112,13 @@ type Runtime interface {
 
 	// SnapshotRestore restore the snapshot of cluster
 	SnapshotRestore(ctx context.Context, path string) error
+
+	// SnapshotSaveWithYAML save the snapshot of cluster
+	SnapshotSaveWithYAML(ctx context.Context, path string, filters []string) error
+
+	// SnapshotRestoreWithYAML restore the snapshot of cluster
+	SnapshotRestoreWithYAML(ctx context.Context, path string, filters []string) error
+
+	// GetWorkdirPath get the workdir path of cluster
+	GetWorkdirPath(name string) string
 }

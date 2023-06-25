@@ -19,15 +19,16 @@ DIR="$(realpath "${DIR}")"
 
 ROOT_DIR="$(realpath "${DIR}/../..")"
 
+BASH_IMAGE=registry.k8s.io/build-image/distroless-iptables:v0.2.4
 CLUSTER_NAME=kwok-test
-KWOK_IMAGE="kwok"
+KWOK_IMAGE="kwok-with-cni"
 KWOK_VERSION="test"
 
 function start_cluster() {
   local linux_platform
   linux_platform="linux/$(go env GOARCH)"
   "${ROOT_DIR}"/hack/releases.sh --bin kwok --platform "${linux_platform}"
-  "${ROOT_DIR}"/images/kwok/build.sh --image "${KWOK_IMAGE}" --version="${KWOK_VERSION}" --platform "${linux_platform}"
+  "${ROOT_DIR}"/images/kwok/build.sh --base-image ${BASH_IMAGE} --image "${KWOK_IMAGE}" --version="${KWOK_VERSION}" --platform "${linux_platform}"
 
   kind create cluster --name="${CLUSTER_NAME}"
 
@@ -38,7 +39,7 @@ function start_cluster() {
 
 # Check for normal heartbeat
 function test_node_ready() {
-  for i in {1..30}; do
+  for ((i = 0; i < 30; i++)); do
     if [[ ! "$(kubectl get node fake-node)" =~ "Ready" ]]; then
       echo "Waiting for fake-node to be ready..."
       sleep 1
@@ -56,8 +57,8 @@ function test_node_ready() {
 
 # Check for the Pod is running
 function test_pod_running() {
-  for i in {1..30}; do
-    if [[ ! "$(kubectl get pod -o wide | grep Running | wc -l)" -eq 5 ]]; then
+  for ((i = 0; i < 30; i++)); do
+    if [[ ! "$(kubectl get pod -o wide | grep -c Running)" -eq 5 ]]; then
       echo "Waiting all pods to be running..."
       sleep 1
     else
@@ -65,7 +66,7 @@ function test_pod_running() {
     fi
   done
 
-  if [[ ! "$(kubectl get pod -o wide | grep Running | wc -l)" -eq 5 ]]; then
+  if [[ ! "$(kubectl get pod -o wide | grep -c Running)" -eq 5 ]]; then
     echo "Error: Not all pods are running"
     kubectl get pod -o wide
     return 1

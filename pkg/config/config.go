@@ -20,43 +20,240 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 	"sigs.k8s.io/yaml"
 
+	configv1alpha1 "sigs.k8s.io/kwok/pkg/apis/config/v1alpha1"
 	"sigs.k8s.io/kwok/pkg/apis/internalversion"
 	"sigs.k8s.io/kwok/pkg/apis/v1alpha1"
 	"sigs.k8s.io/kwok/pkg/config/compatibility"
 	"sigs.k8s.io/kwok/pkg/log"
+	"sigs.k8s.io/kwok/pkg/utils/maps"
+	"sigs.k8s.io/kwok/pkg/utils/patch"
+	"sigs.k8s.io/kwok/pkg/utils/path"
 )
 
-func Load(ctx context.Context, path ...string) ([]metav1.Object, error) {
+func loadRawMessages(src []string) ([]json.RawMessage, error) {
 	var raws []json.RawMessage
 
-	for _, p := range path {
+	for _, p := range src {
+		p, err := path.Expand(p)
+		if err != nil {
+			return nil, err
+		}
 		r, err := loadRawConfig(p)
 		if err != nil {
 			return nil, err
 		}
 		raws = append(raws, r...)
 	}
+	return raws, nil
+}
 
-	var kwokConfiguration *internalversion.KwokConfiguration
-	var kwokctlConfiguration *internalversion.KwokctlConfiguration
+type versiondObject interface {
+	GetObjectKind() schema.ObjectKind
+	InternalObject
+}
+
+// InternalObject is an object that is internal to the kwok project.
+type InternalObject interface {
+	GetNamespace() string
+	GetName() string
+}
+
+type configHandler struct {
+	Unmarshal        func(raw []byte) (versiondObject, error)
+	Marshal          func(obj versiondObject) ([]byte, error)
+	MutateToInternal func(objs []versiondObject) ([]InternalObject, error)
+	MutateToVersiond func(objs []InternalObject) ([]versiondObject, error)
+}
+
+var configHandlers = map[string]configHandler{
+	configv1alpha1.KwokConfigurationKind: {
+		Unmarshal:        unmarshalConfig[*configv1alpha1.KwokConfiguration],
+		Marshal:          marshalConfig,
+		MutateToInternal: mergeAndMutateToInternalConfig(convertToInternalKwokConfiguration),
+		MutateToVersiond: mutateToVersiondConfig(internalversion.ConvertToV1alpha1KwokConfiguration),
+	},
+	configv1alpha1.KwokctlConfigurationKind: {
+		Unmarshal:        unmarshalConfig[*configv1alpha1.KwokctlConfiguration],
+		Marshal:          marshalConfig,
+		MutateToInternal: mergeAndMutateToInternalConfig(convertToInternalKwokctlConfiguration),
+		MutateToVersiond: mutateToVersiondConfig(internalversion.ConvertToV1alpha1KwokctlConfiguration),
+	},
+	v1alpha1.StageKind: {
+		Unmarshal:        unmarshalConfig[*v1alpha1.Stage],
+		Marshal:          marshalConfig,
+		MutateToInternal: mutateToInternalConfig(convertToInternalStage),
+		MutateToVersiond: mutateToVersiondConfig(internalversion.ConvertToV1alpha1Stage),
+	},
+	v1alpha1.PortForwardKind: {
+		Unmarshal:        unmarshalConfig[*v1alpha1.PortForward],
+		Marshal:          marshalConfig,
+		MutateToInternal: mutateToInternalConfig(internalversion.ConvertToInternalPortForward),
+		MutateToVersiond: mutateToVersiondConfig(internalversion.ConvertToV1Alpha1PortForward),
+	},
+	v1alpha1.ClusterPortForwardKind: {
+		Unmarshal:        unmarshalConfig[*v1alpha1.ClusterPortForward],
+		Marshal:          marshalConfig,
+		MutateToInternal: mutateToInternalConfig(internalversion.ConvertToInternalClusterPortForward),
+		MutateToVersiond: mutateToVersiondConfig(internalversion.ConvertToV1Alpha1ClusterPortForward),
+	},
+	v1alpha1.ExecKind: {
+		Unmarshal:        unmarshalConfig[*v1alpha1.Exec],
+		Marshal:          marshalConfig,
+		MutateToInternal: mutateToInternalConfig(internalversion.ConvertToInternalExec),
+		MutateToVersiond: mutateToVersiondConfig(internalversion.ConvertToV1Alpha1Exec),
+	},
+	v1alpha1.ClusterExecKind: {
+		Unmarshal:        unmarshalConfig[*v1alpha1.ClusterExec],
+		Marshal:          marshalConfig,
+		MutateToInternal: mutateToInternalConfig(internalversion.ConvertToInternalClusterExec),
+		MutateToVersiond: mutateToVersiondConfig(internalversion.ConvertToV1Alpha1ClusterExec),
+	},
+	v1alpha1.LogsKind: {
+		Unmarshal:        unmarshalConfig[*v1alpha1.Logs],
+		Marshal:          marshalConfig,
+		MutateToInternal: mutateToInternalConfig(internalversion.ConvertToInternalLogs),
+		MutateToVersiond: mutateToVersiondConfig(internalversion.ConvertToV1Alpha1Logs),
+	},
+	v1alpha1.ClusterLogsKind: {
+		Unmarshal:        unmarshalConfig[*v1alpha1.ClusterLogs],
+		Marshal:          marshalConfig,
+		MutateToInternal: mutateToInternalConfig(internalversion.ConvertToInternalClusterLogs),
+		MutateToVersiond: mutateToVersiondConfig(internalversion.ConvertToV1Alpha1ClusterLogs),
+	},
+	v1alpha1.AttachKind: {
+		Unmarshal:        unmarshalConfig[*v1alpha1.Attach],
+		Marshal:          marshalConfig,
+		MutateToInternal: mutateToInternalConfig(internalversion.ConvertToInternalAttach),
+		MutateToVersiond: mutateToVersiondConfig(internalversion.ConvertToV1Alpha1Attach),
+	},
+	v1alpha1.ClusterAttachKind: {
+		Unmarshal:        unmarshalConfig[*v1alpha1.ClusterAttach],
+		Marshal:          marshalConfig,
+		MutateToInternal: mutateToInternalConfig(internalversion.ConvertToInternalClusterAttach),
+		MutateToVersiond: mutateToVersiondConfig(internalversion.ConvertToV1Alpha1ClusterAttach),
+	},
+	v1alpha1.MetricKind: {
+		Unmarshal:        unmarshalConfig[*v1alpha1.Metric],
+		Marshal:          marshalConfig,
+		MutateToInternal: mutateToInternalConfig(internalversion.ConvertToInternalMetric),
+		MutateToVersiond: mutateToVersiondConfig(internalversion.ConvertToV1Alpha1Metric),
+	},
+}
+
+func unmarshalConfig[T versiondObject](raw []byte) (versiondObject, error) {
+	var obj T
+	err := json.Unmarshal(raw, &obj)
+	return obj, err
+}
+
+func marshalConfig(obj versiondObject) ([]byte, error) {
+	return json.Marshal(obj)
+}
+
+func mergeAndMutateToInternalConfig[V versiondObject, I InternalObject](fun func(V) (I, error)) func(objs []versiondObject) ([]InternalObject, error) {
+	return func(objs []versiondObject) ([]InternalObject, error) {
+		if len(objs) == 0 {
+			return []InternalObject{}, nil
+		}
+
+		var v V
+		if len(objs) == 1 {
+			obj, ok := objs[0].(V)
+			if !ok {
+				return nil, fmt.Errorf("unexpected type %T", objs[0])
+			}
+			v = obj
+		} else {
+			obj, ok := objs[0].(V)
+			if !ok {
+				return nil, fmt.Errorf("unexpected type %T", objs[0])
+			}
+			for _, o := range objs[1:] {
+				a, ok := o.(V)
+				if !ok {
+					return nil, fmt.Errorf("unexpected type %T", o)
+				}
+				r, err := patch.StrategicMerge(obj, a)
+				if err != nil {
+					return nil, err
+				}
+				obj = r
+			}
+			v = obj
+		}
+
+		i, err := fun(v)
+		if err != nil {
+			return nil, err
+		}
+		return []InternalObject{i}, nil
+	}
+}
+
+func mutateToInternalConfig[V versiondObject, I InternalObject](fun func(V) (I, error)) func(objs []versiondObject) ([]InternalObject, error) {
+	return func(objs []versiondObject) ([]InternalObject, error) {
+		var internalObjs []InternalObject
+		for _, obj := range objs {
+			v, ok := obj.(V)
+			if !ok {
+				return nil, fmt.Errorf("unexpected type %T", obj)
+			}
+			i, err := fun(v)
+			if err != nil {
+				return nil, err
+			}
+			internalObjs = append(internalObjs, i)
+		}
+		return internalObjs, nil
+	}
+}
+
+func mutateToVersiondConfig[V versiondObject, I InternalObject](fun func(I) (V, error)) func(objs []InternalObject) ([]versiondObject, error) {
+	return func(objs []InternalObject) ([]versiondObject, error) {
+		var versiondObjs []versiondObject
+		for _, obj := range objs {
+			i, ok := obj.(I)
+			if !ok {
+				return nil, fmt.Errorf("unexpected type %T", obj)
+			}
+			v, err := fun(i)
+			if err != nil {
+				return nil, err
+			}
+			versiondObjs = append(versiondObjs, v)
+		}
+		return versiondObjs, nil
+	}
+}
+
+// Load loads the given path into the context.
+func Load(ctx context.Context, src ...string) ([]InternalObject, error) {
+	raws, err := loadRawMessages(src)
+	if err != nil {
+		return nil, err
+	}
+
+	result := map[string][]versiondObject{}
 
 	logger := log.FromContext(ctx)
 	meta := metav1.TypeMeta{}
-	objs := make([]metav1.Object, 0, len(raws))
 	for _, raw := range raws {
 		err := json.Unmarshal(raw, &meta)
 		if err != nil {
 			logger.Error("Unsupported config", err,
-				"path", path,
+				"src", src,
 			)
 			continue
 		}
@@ -64,90 +261,67 @@ func Load(ctx context.Context, path ...string) ([]metav1.Object, error) {
 		gvk := meta.GroupVersionKind()
 
 		// Converting old configurations to the latest
+		// TODO: Remove this in the future
 		if gvk.Version == "" && gvk.Group == "" && gvk.Kind == "" {
 			conf := compatibility.Config{}
 			err = json.Unmarshal(raw, &conf)
 			if err != nil {
 				logger.Error("Unsupported config", err,
-					"path", path,
+					"src", src,
 				)
 				continue
 			}
 			obj, ok := compatibility.Convert_Config_To_internalversion_KwokctlConfiguration(&conf)
 			if ok {
 				logger.Debug("Convert old config",
-					"path", path,
+					"src", src,
 				)
-				objs = append(objs, obj)
-				continue
+				return []InternalObject{obj}, nil
 			}
 		}
 
-		if gvk.Version != v1alpha1.GroupVersion.Version ||
-			gvk.Group != v1alpha1.GroupVersion.Group {
+		handler, ok := configHandlers[gvk.Kind]
+		if !ok {
 			logger.Warn("Unsupported type",
 				"apiVersion", meta.APIVersion,
 				"kind", meta.Kind,
-				"path", path,
+				"src", src,
 			)
 			continue
 		}
-		switch gvk.Kind {
-		default:
-			logger.Warn("Unsupported type",
-				"apiVersion", meta.APIVersion,
-				"kind", meta.Kind,
-				"path", path,
-			)
-		case v1alpha1.KwokConfigurationKind:
-			obj := &v1alpha1.KwokConfiguration{}
-			err = json.Unmarshal(raw, &obj)
-			if err != nil {
-				return nil, err
-			}
-			obj = setKwokConfigurationDefaults(obj)
-			out, err := internalversion.ConvertToInternalVersionKwokConfiguration(obj)
-			if err != nil {
-				return nil, err
-			}
-			kwokConfiguration = out
-		case v1alpha1.KwokctlConfigurationKind:
-			obj := &v1alpha1.KwokctlConfiguration{}
-			err = json.Unmarshal(raw, &obj)
-			if err != nil {
-				return nil, err
-			}
-			obj = setKwokctlConfigurationDefaults(obj)
-			out, err := internalversion.ConvertToInternalVersionKwokctlConfiguration(obj)
-			if err != nil {
-				return nil, err
-			}
-			kwokctlConfiguration = out
-		case v1alpha1.StageKind:
-			obj := &v1alpha1.Stage{}
-			err = json.Unmarshal(raw, &obj)
-			if err != nil {
-				return nil, err
-			}
-			obj = setStageDefaults(obj)
-			out, err := internalversion.ConvertToInternalVersionStage(obj)
-			if err != nil {
-				return nil, err
-			}
-			objs = append(objs, out)
+
+		vobj, err := handler.Unmarshal(raw)
+		if err != nil {
+			return nil, err
 		}
+		result[gvk.Kind] = append(result[gvk.Kind], vobj)
 	}
 
-	if kwokctlConfiguration != nil {
-		objs = append(objs, kwokctlConfiguration)
+	kinds := maps.Keys(result)
+	sort.Strings(kinds)
+	objs := []InternalObject{}
+	for _, kind := range kinds {
+		handler, ok := configHandlers[kind]
+		if !ok {
+			logger.Warn("Unsupported type",
+				"kind", kind,
+				"src", src,
+			)
+			continue
+		}
+		versiondObjs := result[kind]
+		internalObjs, err := handler.MutateToInternal(versiondObjs)
+		if err != nil {
+			return nil, err
+		}
+		objs = append(objs, internalObjs...)
 	}
-	if kwokConfiguration != nil {
-		objs = append(objs, kwokConfiguration)
-	}
+
 	return objs, nil
 }
 
-func Save(ctx context.Context, path string, objs []metav1.Object) error {
+// Save saves the given objects to the given path.
+func Save(ctx context.Context, path string, objs []InternalObject) error {
 	err := os.MkdirAll(filepath.Dir(path), 0750)
 	if err != nil {
 		return err
@@ -173,29 +347,33 @@ func Save(ctx context.Context, path string, objs []metav1.Object) error {
 			}
 		}
 
-		switch o := obj.(type) {
-		default:
+		typ := reflect.TypeOf(obj)
+		if typ.Kind() == reflect.Ptr {
+			typ = typ.Elem()
+		}
+		kind := typ.Name()
+		handler, ok := configHandlers[kind]
+		if !ok {
 			logger.Warn("Unsupported type",
-				"type", reflect.TypeOf(obj).String(),
+				"type", kind,
 			)
 			continue
-		case *internalversion.KwokConfiguration:
-			obj, err = internalversion.ConvertToV1alpha1KwokConfiguration(o)
-			if err != nil {
-				return err
-			}
-		case *internalversion.KwokctlConfiguration:
-			obj, err = internalversion.ConvertToV1alpha1KwokctlConfiguration(o)
-			if err != nil {
-				return err
-			}
-		case *internalversion.Stage:
-			obj, err = internalversion.ConvertToV1alpha1Stage(o)
-			if err != nil {
-				return err
-			}
 		}
-		data, err := yaml.Marshal(obj)
+
+		versiondObj, err := handler.MutateToVersiond([]InternalObject{obj})
+		if err != nil {
+			return err
+		}
+		if len(versiondObj) != 1 {
+			return fmt.Errorf("unexpected length of versiond object: %d", len(versiondObj))
+		}
+
+		data, err := handler.Marshal(versiondObj[0])
+		if err != nil {
+			return err
+		}
+
+		data, err = yaml.JSONToYAML(data)
 		if err != nil {
 			return err
 		}
@@ -208,7 +386,8 @@ func Save(ctx context.Context, path string, objs []metav1.Object) error {
 	return nil
 }
 
-func FilterWithType[T metav1.Object](objs []metav1.Object) (out []T) {
+// FilterWithType returns a list of objects with the given type.
+func FilterWithType[T InternalObject](objs []InternalObject) (out []T) {
 	for _, obj := range objs {
 		o, ok := obj.(T)
 		if ok {
@@ -218,7 +397,8 @@ func FilterWithType[T metav1.Object](objs []metav1.Object) (out []T) {
 	return out
 }
 
-func FilterWithoutType[T metav1.Object](objs []metav1.Object) (out []metav1.Object) {
+// FilterWithoutType filters out objects of the given type.
+func FilterWithoutType[T InternalObject](objs []InternalObject) (out []InternalObject) {
 	for _, obj := range objs {
 		_, ok := obj.(T)
 		if !ok {
@@ -228,19 +408,19 @@ func FilterWithoutType[T metav1.Object](objs []metav1.Object) (out []metav1.Obje
 	return out
 }
 
+// FilterWithTypeFromContext returns all objects of the given type from the context.
 func FilterWithTypeFromContext[T metav1.Object](ctx context.Context) (out []T) {
-	v := ctx.Value(configCtx(0))
-	objs, ok := v.([]metav1.Object)
-	if !ok {
+	objs := getFromContext(ctx)
+	if len(objs) == 0 {
 		return nil
 	}
 	return FilterWithType[T](objs)
 }
 
-func FilterWithoutTypeFromContext[T metav1.Object](ctx context.Context) (out []metav1.Object) {
-	v := ctx.Value(configCtx(0))
-	objs, ok := v.([]metav1.Object)
-	if !ok {
+// FilterWithoutTypeFromContext returns all objects from the context that are not of the given type.
+func FilterWithoutTypeFromContext[T InternalObject](ctx context.Context) (out []InternalObject) {
+	objs := getFromContext(ctx)
+	if len(objs) == 0 {
 		return nil
 	}
 	return FilterWithoutType[T](objs)
@@ -264,6 +444,10 @@ func loadRawConfig(p string) ([]json.RawMessage, error) {
 				break
 			}
 			return nil, err
+		}
+		if len(raw) == 0 {
+			// Ignore empty documents
+			continue
 		}
 		raws = append(raws, raw)
 	}

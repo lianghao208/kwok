@@ -17,7 +17,9 @@ set -o errexit
 set -o nounset
 set -o pipefail
 
-ROOT_DIR="$(dirname "${BASH_SOURCE[0]}")/.."
+DIR="$(dirname "${BASH_SOURCE[0]}")"
+
+ROOT_DIR="$(realpath "${DIR}/..")"
 
 failed=()
 
@@ -41,9 +43,39 @@ if [[ "${VERIFY_GO_FORMAT:-true}" == "true" ]]; then
   "${ROOT_DIR}"/hack/verify-go-format.sh || failed+=(go-format)
 fi
 
-if [[ "${VERIFY_GENERATE:-true}" == "true" ]]; then
-  echo "[*] Verifying generate..."
-  "${ROOT_DIR}"/hack/verify-generate.sh || failed+=(go-generate)
+if [[ "${VERIFY_CODEGEN:-true}" == "true" ]]; then
+  echo "[*] Verifying codegen..."
+  "${ROOT_DIR}"/hack/verify-codegen.sh || failed+=(codegen)
+fi
+
+if [[ "${VERIFY_CMD_DOCS:-true}" == "true" ]]; then
+  echo "[*] Verifying cmd docs..."
+  "${ROOT_DIR}"/hack/verify-cmd-docs.sh || failed+=(cmd-docs)
+fi
+
+if [[ "${VERIFY_API_DOCS:-true}" == "true" ]]; then
+  echo "[*] Verifying api docs..."
+  "${ROOT_DIR}"/hack/verify-api-docs.sh || failed+=(api-docs)
+fi
+
+if [[ "${VERIFY_YAMLLINT:-true}" == "true" ]]; then
+  echo "[*] Verifying YAML lint..."
+  "${ROOT_DIR}"/hack/verify-yamllint.sh || failed+=(yamllint)
+fi
+
+if [[ "${VERIFY_SHELLCHECK:-true}" == "true" ]]; then
+  echo "[*] Verifying shell check..."
+  "${ROOT_DIR}"/hack/verify-shellcheck.sh || failed+=(shellcheck)
+fi
+
+if [[ "${VERIFY_SHELL_FORMAT:-true}" == "true" ]]; then
+  echo "[*] Verifying shell format..."
+  "${ROOT_DIR}"/hack/verify-shell-format.sh || failed+=(shell-format)
+fi
+
+if [[ "${VERIFY_SPELLING:-true}" == "true" ]]; then
+  echo "[*] Verifying spelling..."
+  "${ROOT_DIR}"/hack/verify-spelling.sh || failed+=(spelling)
 fi
 
 # exit based on verify scripts

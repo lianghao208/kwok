@@ -17,17 +17,21 @@ limitations under the License.
 package components
 
 import (
+	"fmt"
+
 	"sigs.k8s.io/kwok/pkg/apis/internalversion"
+	"sigs.k8s.io/kwok/pkg/log"
 	"sigs.k8s.io/kwok/pkg/utils/format"
 	"sigs.k8s.io/kwok/pkg/utils/version"
 )
 
+// BuildKubeApiserverComponentConfig is the configuration for building a kube-apiserver component.
 type BuildKubeApiserverComponentConfig struct {
 	Binary            string
 	Image             string
 	Version           version.Version
 	Workdir           string
-	Address           string
+	BindAddress       string
 	Port              uint32
 	EtcdAddress       string
 	EtcdPort          uint32
@@ -35,32 +39,41 @@ type BuildKubeApiserverComponentConfig struct {
 	KubeFeatureGates  string
 	SecurePort        bool
 	KubeAuthorization bool
+	KubeAdmission     bool
 	AuditPolicyPath   string
 	AuditLogPath      string
 	CaCertPath        string
 	AdminCertPath     string
 	AdminKeyPath      string
+	Verbosity         log.Level
+	DisableQPSLimits  bool
+	ExtraArgs         []internalversion.ExtraArgs
+	ExtraVolumes      []internalversion.Volume
 }
 
+// BuildKubeApiserverComponent builds a kube-apiserver component.
 func BuildKubeApiserverComponent(conf BuildKubeApiserverComponentConfig) (component internalversion.Component, err error) {
 	if conf.EtcdPort == 0 {
 		conf.EtcdPort = 2379
 	}
 
-	if conf.Address == "" {
-		conf.Address = publicAddress
-	}
-
-	if conf.EtcdAddress == "" {
-		conf.EtcdAddress = localAddress
-	}
-
 	kubeApiserverArgs := []string{
-		"--admission-control=",
-		"--etcd-servers=http://" + conf.EtcdAddress + ":" + format.String(conf.EtcdPort),
 		"--etcd-prefix=/registry",
 		"--allow-privileged=true",
 	}
+
+	if conf.KubeAdmission {
+		if conf.Version.LT(version.NewVersion(1, 21, 0)) && !conf.KubeAuthorization {
+			return component, fmt.Errorf("the kube-apiserver version is less than 1.21.0, and the --kube-authorization is not enabled, so the --kube-admission cannot be enabled")
+		}
+	} else {
+		// TODO: use enable-admission-plugins and disable-admission-plugins instead of admission-control
+		kubeApiserverArgs = append(kubeApiserverArgs,
+			"--admission-control=",
+		)
+	}
+
+	kubeApiserverArgs = append(kubeApiserverArgs, extraArgsToStrings(conf.ExtraArgs)...)
 	if conf.KubeRuntimeConfig != "" {
 		kubeApiserverArgs = append(kubeApiserverArgs,
 			"--runtime-config="+conf.KubeRuntimeConfig,
@@ -72,9 +85,34 @@ func BuildKubeApiserverComponent(conf BuildKubeApiserverComponentConfig) (compon
 		)
 	}
 
-	inContainer := conf.Image != ""
+	if conf.DisableQPSLimits {
+		kubeApiserverArgs = append(kubeApiserverArgs,
+			"--max-requests-inflight=0",
+			"--max-mutating-requests-inflight=0",
+		)
+
+		// FeatureGate APIPriorityAndFairness is not available before 1.17.0
+		if conf.Version.GE(version.NewVersion(1, 18, 0)) {
+			kubeApiserverArgs = append(kubeApiserverArgs,
+				"--enable-priority-and-fairness=false",
+			)
+		}
+	}
+
 	var ports []internalversion.Port
 	var volumes []internalversion.Volume
+	volumes = append(volumes, conf.ExtraVolumes...)
+
+	inContainer := conf.Image != ""
+	if inContainer {
+		kubeApiserverArgs = append(kubeApiserverArgs,
+			"--etcd-servers=http://"+conf.EtcdAddress+":2379",
+		)
+	} else {
+		kubeApiserverArgs = append(kubeApiserverArgs,
+			"--etcd-servers=http://"+conf.EtcdAddress+":"+format.String(conf.EtcdPort),
+		)
+	}
 
 	if conf.SecurePort {
 		if conf.KubeAuthorization {
@@ -108,7 +146,7 @@ func BuildKubeApiserverComponent(conf BuildKubeApiserverComponentConfig) (compon
 				},
 			)
 			kubeApiserverArgs = append(kubeApiserverArgs,
-				"--bind-address="+publicAddress,
+				"--bind-address="+conf.BindAddress,
 				"--secure-port=6443",
 				"--tls-cert-file=/etc/kubernetes/pki/admin.crt",
 				"--tls-private-key-file=/etc/kubernetes/pki/admin.key",
@@ -119,7 +157,7 @@ func BuildKubeApiserverComponent(conf BuildKubeApiserverComponentConfig) (compon
 			)
 		} else {
 			kubeApiserverArgs = append(kubeApiserverArgs,
-				"--bind-address="+conf.Address,
+				"--bind-address="+conf.BindAddress,
 				"--secure-port="+format.String(conf.Port),
 				"--tls-cert-file="+conf.AdminCertPath,
 				"--tls-private-key-file="+conf.AdminKeyPath,
@@ -139,12 +177,12 @@ func BuildKubeApiserverComponent(conf BuildKubeApiserverComponentConfig) (compon
 			}
 
 			kubeApiserverArgs = append(kubeApiserverArgs,
-				"--insecure-bind-address="+publicAddress,
+				"--insecure-bind-address="+conf.BindAddress,
 				"--insecure-port=8080",
 			)
 		} else {
 			kubeApiserverArgs = append(kubeApiserverArgs,
-				"--insecure-bind-address="+conf.Address,
+				"--insecure-bind-address="+conf.BindAddress,
 				"--insecure-port="+format.String(conf.Port),
 			)
 		}
@@ -174,6 +212,10 @@ func BuildKubeApiserverComponent(conf BuildKubeApiserverComponentConfig) (compon
 				"--audit-log-path="+conf.AuditLogPath,
 			)
 		}
+	}
+
+	if conf.Verbosity != log.LevelInfo {
+		kubeApiserverArgs = append(kubeApiserverArgs, "--v="+format.String(log.ToKlogLevel(conf.Verbosity)))
 	}
 
 	return internalversion.Component{

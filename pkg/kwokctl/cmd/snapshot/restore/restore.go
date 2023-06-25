@@ -19,20 +19,24 @@ package restore
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
 
 	"github.com/spf13/cobra"
 
 	"sigs.k8s.io/kwok/pkg/config"
 	"sigs.k8s.io/kwok/pkg/kwokctl/runtime"
+	"sigs.k8s.io/kwok/pkg/kwokctl/snapshot"
 	"sigs.k8s.io/kwok/pkg/log"
 	"sigs.k8s.io/kwok/pkg/utils/path"
 )
 
 type flagpole struct {
-	Name   string
-	Path   string
-	Format string
+	Name    string
+	Path    string
+	Format  string
+	Filters []string
 }
 
 // NewCommand returns a new cobra.Command to save the cluster as a snapshot.
@@ -43,14 +47,14 @@ func NewCommand(ctx context.Context) *cobra.Command {
 		Args:  cobra.NoArgs,
 		Use:   "restore",
 		Short: "Restore the snapshot of the cluster",
-		Long:  "Restore the snapshot of the cluster",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			flags.Name = config.DefaultCluster
 			return runE(cmd.Context(), flags)
 		},
 	}
 	cmd.Flags().StringVar(&flags.Path, "path", "", "Path to the snapshot")
-	cmd.Flags().StringVar(&flags.Format, "format", "etcd", "Format of the snapshot file (etcd)")
+	cmd.Flags().StringVar(&flags.Format, "format", "etcd", "Format of the snapshot file (etcd, k8s)")
+	cmd.Flags().StringSliceVar(&flags.Filters, "filter", snapshot.Resources, "Filter the resources to restore, only support for k8s format")
 	return cmd
 }
 
@@ -60,6 +64,9 @@ func runE(ctx context.Context, flags *flagpole) error {
 	if flags.Path == "" {
 		return fmt.Errorf("path is required")
 	}
+	if _, err := os.Stat(flags.Path); err != nil {
+		return fmt.Errorf("path %q does not exist", flags.Path)
+	}
 
 	logger := log.FromContext(ctx)
 	logger = logger.With("cluster", flags.Name)
@@ -67,15 +74,30 @@ func runE(ctx context.Context, flags *flagpole) error {
 
 	rt, err := runtime.DefaultRegistry.Load(ctx, name, workdir)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			logger.Warn("Cluster is not exists")
+		}
 		return err
 	}
 
-	if flags.Format == "etcd" {
+	defer func() {
+		if err != nil {
+			_ = os.Remove(flags.Path)
+		}
+	}()
+
+	switch flags.Format {
+	case "etcd":
 		err = rt.SnapshotRestore(ctx, flags.Path)
 		if err != nil {
 			return err
 		}
-	} else {
+	case "k8s":
+		err = rt.SnapshotRestoreWithYAML(ctx, flags.Path, flags.Filters)
+		if err != nil {
+			return err
+		}
+	default:
 		return fmt.Errorf("unsupport format %q", flags.Format)
 	}
 	return nil

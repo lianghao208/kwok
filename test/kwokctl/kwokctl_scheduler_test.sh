@@ -17,6 +17,8 @@ DIR="$(dirname "${BASH_SOURCE[0]}")"
 
 DIR="$(realpath "${DIR}")"
 
+source "${DIR}/suite.sh"
+
 RELEASES=()
 
 function usage() {
@@ -35,51 +37,10 @@ function args() {
   done
 }
 
-
-function show_info() {
-    local name="${1}"
-    echo kwokctl get clusters
-    kwokctl get clusters
-    echo
-    echo kwokctl --name="${name}" kubectl get pod -o wide --all-namespaces
-    kwokctl --name="${name}" kubectl get pod -o wide --all-namespaces
-    echo
-    echo kwokctl --name="${name}" logs etcd
-    kwokctl --name="${name}" logs etcd
-    echo
-    echo kwokctl --name="${name}" logs kube-apiserver
-    kwokctl --name="${name}" logs kube-apiserver
-    echo
-    echo kwokctl --name="${name}" logs kube-controller-manager
-    kwokctl --name="${name}" logs kube-controller-manager
-    echo
-    echo kwokctl --name="${name}" logs kube-scheduler
-    kwokctl --name="${name}" logs kube-scheduler
-    echo
-}
-
-function test_create_cluster() {
-  local release="${1}"
-  local name="${2}"
-
-  KWOK_KUBE_VERSION="${release}" kwokctl -v=-4 create cluster --name "${name}" --timeout 10m --wait 10m --quiet-pull --kube-scheduler-config="${DIR}/scheduler-config.yaml"
-  if [[ $? -ne 0 ]]; then
-    echo "Error: Cluster ${name} creation failed"
-    exit 1
-  fi
-}
-
-function test_delete_cluster() {
-  local release="${1}"
-  local name="${2}"
-  kwokctl delete cluster --name "${name}"
-}
-
 function test_scheduler() {
-  local release="${1}"
-  local name="${2}"
+  local name="${1}"
 
-  for ((i = 0; i < 30; i++)); do
+  for ((i = 0; i < 120; i++)); do
     kwokctl --name "${name}" kubectl apply -f "${DIR}/fake-node.yaml"
     if kwokctl --name="${name}" kubectl get node | grep Ready >/dev/null 2>&1; then
       break
@@ -87,7 +48,7 @@ function test_scheduler() {
     sleep 1
   done
 
-  for ((i = 0; i < 30; i++)); do
+  for ((i = 0; i < 120; i++)); do
     kwokctl --name "${name}" kubectl apply -f "${DIR}/fake-scheduler-deployment.yaml"
     if kwokctl --name="${name}" kubectl get pod | grep Running >/dev/null 2>&1; then
       break
@@ -97,7 +58,6 @@ function test_scheduler() {
 
   if ! kwokctl --name="${name}" kubectl get pod | grep Running >/dev/null 2>&1; then
     echo "Error: cluster not ready"
-    show_info "${name}"
     return 1
   fi
 }
@@ -108,9 +68,9 @@ function main() {
     echo "------------------------------"
     echo "Testing scheduler on ${KWOK_RUNTIME} for ${release}"
     name="scheduler-cluster-${KWOK_RUNTIME}-${release//./-}"
-    test_create_cluster "${release}" "${name}" || failed+=("create_cluster_${name}")
-    test_scheduler "${release}" "${name}" || failed+=("scheduler_${name}")
-    test_delete_cluster "${release}" "${name}" || failed+=("delete_cluster_${name}")
+    create_cluster "${name}" "${release}" --kube-scheduler-config "${DIR}/scheduler-config.yaml"
+    test_scheduler "${name}" || failed+=("scheduler_${name}")
+    delete_cluster "${name}"
   done
 
   if [[ "${#failed[@]}" -ne 0 ]]; then

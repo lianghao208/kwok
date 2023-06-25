@@ -22,13 +22,11 @@ import (
 
 	"sigs.k8s.io/kwok/pkg/log"
 	"sigs.k8s.io/kwok/pkg/utils/exec"
-	"sigs.k8s.io/kwok/pkg/utils/file"
+	"sigs.k8s.io/kwok/pkg/utils/wait"
 )
 
 // SnapshotSave save the snapshot of cluster
 func (c *Cluster) SnapshotSave(ctx context.Context, path string) error {
-	etcdContainerName := c.getComponentName("etcd")
-
 	kindName := c.getClusterName()
 
 	logger := log.FromContext(ctx)
@@ -36,12 +34,12 @@ func (c *Cluster) SnapshotSave(ctx context.Context, path string) error {
 	// Save to /var/lib/etcd/snapshot.db on container of Kind use Kubectl
 	// Why this path, etcd is just the volume /var/lib/etcd/ in container of Kind.
 	tmpFile := "/var/lib/etcd/snapshot.db"
-	err := c.KubectlInCluster(ctx, exec.IOStreams{}, "exec", "-i", "-n", "kube-system", etcdContainerName, "--", "etcdctl", "snapshot", "save", tmpFile, "--endpoints=127.0.0.1:2379", "--cert=/etc/kubernetes/pki/etcd/server.crt", "--key=/etc/kubernetes/pki/etcd/server.key", "--cacert=/etc/kubernetes/pki/etcd/ca.crt")
+	err := c.EtcdctlInCluster(ctx, "snapshot", "save", tmpFile)
 	if err != nil {
 		return err
 	}
 	defer func() {
-		err = exec.Exec(ctx, "", exec.IOStreams{}, "docker", "exec", "-i", kindName, "rm", "-f", tmpFile)
+		err = exec.Exec(ctx, c.runtime, "exec", "-i", kindName, "rm", "-f", tmpFile)
 		if err != nil {
 			logger.Error("Failed to clean snapshot", err)
 		}
@@ -49,7 +47,7 @@ func (c *Cluster) SnapshotSave(ctx context.Context, path string) error {
 
 	// Copy to host path from container of Kind use Docker
 	// Etcd image does not have `tar`, can't use `kubectl cp`, so we use `docker cp` instead
-	err = exec.Exec(ctx, "", exec.IOStreams{}, "docker", "cp", kindName+":"+tmpFile, path)
+	err = exec.Exec(ctx, c.runtime, "cp", kindName+":"+tmpFile, path)
 	if err != nil {
 		return err
 	}
@@ -59,23 +57,8 @@ func (c *Cluster) SnapshotSave(ctx context.Context, path string) error {
 
 // SnapshotRestore restore the snapshot of cluster
 func (c *Cluster) SnapshotRestore(ctx context.Context, path string) error {
-	config, err := c.Config(ctx)
-	if err != nil {
-		return err
-	}
-	conf := &config.Options
-
-	kindName := c.getClusterName()
-
-	etcdctlPath := c.GetBinPath("etcdctl" + conf.BinSuffix)
-
-	err = file.DownloadWithCacheAndExtract(ctx, conf.CacheDir, conf.EtcdBinaryTar, etcdctlPath, "etcdctl"+conf.BinSuffix, 0755, conf.QuietPull, true)
-	if err != nil {
-		return err
-	}
-
 	logger := log.FromContext(ctx)
-	err = c.StopComponent(ctx, "etcd")
+	err := c.StopComponent(ctx, "etcd")
 	if err != nil {
 		logger.Error("Failed to stop etcd", err)
 	}
@@ -88,7 +71,7 @@ func (c *Cluster) SnapshotRestore(ctx context.Context, path string) error {
 
 	// Restore snapshot to host temporary directory
 	etcdDataTmp := c.GetWorkdirPath("etcd")
-	err = exec.Exec(ctx, "", exec.IOStreams{}, etcdctlPath, "snapshot", "restore", path, "--data-dir", etcdDataTmp)
+	err = c.Etcdctl(ctx, "snapshot", "restore", path, "--data-dir", etcdDataTmp)
 	if err != nil {
 		return err
 	}
@@ -99,11 +82,45 @@ func (c *Cluster) SnapshotRestore(ctx context.Context, path string) error {
 		}
 	}()
 
+	kindName := c.getClusterName()
 	// Copy to kind container from host temporary directory
-	err = exec.Exec(ctx, "", exec.IOStreams{}, "docker", "cp", etcdDataTmp, kindName+":/var/lib/")
+	err = exec.Exec(ctx, c.runtime, "cp", etcdDataTmp, kindName+":/var/lib/")
 	if err != nil {
 		return err
 	}
 
+	return nil
+}
+
+// SnapshotSaveWithYAML save the snapshot of cluster
+func (c *Cluster) SnapshotSaveWithYAML(ctx context.Context, path string, filters []string) error {
+	err := c.Cluster.SnapshotSaveWithYAML(ctx, path, filters)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+// SnapshotRestoreWithYAML restore the snapshot of cluster
+func (c *Cluster) SnapshotRestoreWithYAML(ctx context.Context, path string, filters []string) error {
+	logger := log.FromContext(ctx)
+	err := wait.Poll(ctx, func(ctx context.Context) (bool, error) {
+		err := c.StopComponent(ctx, "kube-controller-manager")
+		return err == nil, err
+	})
+	if err != nil {
+		logger.Error("Failed to stop kube-controller-manager", err)
+	}
+	defer func() {
+		err = c.StartComponent(ctx, "kube-controller-manager")
+		if err != nil {
+			logger.Error("Failed to start kube-controller-manager", err)
+		}
+	}()
+
+	err = c.Cluster.SnapshotRestoreWithYAML(ctx, path, filters)
+	if err != nil {
+		return err
+	}
 	return nil
 }

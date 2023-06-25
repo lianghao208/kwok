@@ -22,6 +22,10 @@ import (
 	"strings"
 	"text/template"
 
+	"sigs.k8s.io/kwok/pkg/apis/internalversion"
+	"sigs.k8s.io/kwok/pkg/kwokctl/runtime"
+	"sigs.k8s.io/kwok/pkg/log"
+
 	_ "embed"
 )
 
@@ -30,21 +34,34 @@ var kwokControllerPodYamlTpl string
 
 var kwokControllerPodYamlTemplate = template.Must(template.New("_").Parse(kwokControllerPodYamlTpl))
 
+// BuildKwokControllerPod builds the kwok controller pod yaml content.
 func BuildKwokControllerPod(conf BuildKwokControllerPodConfig) (string, error) {
 	buf := bytes.NewBuffer(nil)
 	split := strings.SplitN(conf.KwokControllerImage, ":", 2)
 	conf.KwokControllerImageName = split[0]
 	conf.KwokControllerImageTag = split[1]
-	err := kwokControllerPodYamlTemplate.Execute(buf, conf)
+
+	var err error
+	conf.ExtraVolumes, err = runtime.ExpandVolumesHostPaths(conf.ExtraVolumes)
+	if err != nil {
+		return "", fmt.Errorf("failed to expand host volume paths: %w", err)
+	}
+
+	err = kwokControllerPodYamlTemplate.Execute(buf, conf)
 	if err != nil {
 		return "", fmt.Errorf("failed to execute kwok controller pod yaml template: %w", err)
 	}
 	return buf.String(), nil
 }
 
+// BuildKwokControllerPodConfig is the configuration for building the kwok controller pod
 type BuildKwokControllerPodConfig struct {
-	KwokControllerImage     string
-	KwokControllerImageName string
-	KwokControllerImageTag  string
-	Name                    string
+	KwokControllerImage      string
+	KwokControllerImageName  string
+	KwokControllerImageTag   string
+	Name                     string
+	Verbosity                log.Level
+	NodeLeaseDurationSeconds uint
+	ExtraArgs                []internalversion.ExtraArgs
+	ExtraVolumes             []internalversion.Volume
 }

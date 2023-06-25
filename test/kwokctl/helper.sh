@@ -19,6 +19,9 @@ DIR="$(realpath "${DIR}")"
 
 ROOT_DIR="$(realpath "${DIR}/../..")"
 
+source "${ROOT_DIR}/hack/requirements.sh"
+source "${DIR}/suite.sh"
+
 VERSION="$("${ROOT_DIR}/hack/get-version.sh")"
 
 GOOS="$(go env GOOS)"
@@ -28,7 +31,7 @@ LOCAL_PATH="${ROOT_DIR}/bin/${GOOS}/${GOARCH}"
 
 export KWOK_CONTROLLER_BINARY="${LOCAL_PATH}/kwok"
 export KWOKCTL_CONTROLLER_BINARY="${LOCAL_PATH}/kwokctl"
-export KWOK_CONTROLLER_IMAGE="local/kwok:${VERSION}"
+export KWOK_CONTROLLER_IMAGE="localhost/kwok:${VERSION}"
 export PATH="${LOCAL_PATH}:${PATH}"
 
 function test_all() {
@@ -37,14 +40,24 @@ function test_all() {
   local releases=("${@:3}")
 
   echo "Test ${cases} on ${runtime} for ${releases[*]}"
-  KWOK_RUNTIME="${runtime}" "${DIR}/kwokctl_${cases}_test.sh" "${releases[@]}"
+  if KWOK_RUNTIME="${runtime}" "${DIR}/kwokctl_${cases}_test.sh" "${releases[@]}"; then
+    rm -rf "${KWOK_LOGS_DIR}"
+  else
+    return 1
+  fi
+
+  for name in $(kwokctl get clusters); do
+    echo "Clean up cluster '${name}' that have not been deleted."
+    delete_cluster "${name}"
+    return 1
+  done
 }
 
 # Test only the latest releases of Kubernetes
 LAST_RELEASE_SIZE="${LAST_RELEASE_SIZE:-1}"
 
 function supported_releases() {
-  cat "${ROOT_DIR}/supported_releases.txt" | head -n "${LAST_RELEASE_SIZE}"
+  head <"${ROOT_DIR}/supported_releases.txt" -n "${LAST_RELEASE_SIZE}"
 }
 
 function build_kwokctl() {
@@ -62,16 +75,35 @@ function build_kwok() {
 }
 
 function build_image() {
-  if docker image inspect "${KWOK_CONTROLLER_IMAGE}" >/dev/null 2>&1; then
+  builder=${1:-"docker"}
+  if ${builder} image inspect "${KWOK_CONTROLLER_IMAGE}" >/dev/null 2>&1; then
     return
   fi
   "${ROOT_DIR}/hack/releases.sh" --bin kwok --version "${KWOK_CONTROLLER_IMAGE##*:}" --platform "linux/${GOARCH}"
-  "${ROOT_DIR}/images/kwok/build.sh" --image "${KWOK_CONTROLLER_IMAGE%%:*}" --version "${VERSION}"
+  "${ROOT_DIR}/images/kwok/build.sh" --image "${KWOK_CONTROLLER_IMAGE%%:*}" --version "${VERSION}" --builder "${builder}" --platform "linux/${GOARCH}"
 }
 
-function build_image_for_nerdctl() {
+function requirements() {
+  install_kubectl
+  install_buildx
+  build_kwokctl
   build_image
-  mkdir "tmp"
-  docker save -o "tmp/kwok.tar" "${KWOK_CONTROLLER_IMAGE}"
-  nerdctl load -i "tmp/kwok.tar"
+}
+
+function requirements_for_podman() {
+  install_kubectl
+  build_kwokctl
+  build_image podman
+}
+
+function requirements_for_nerdctl() {
+  install_kubectl
+  build_kwokctl
+  build_image nerdctl
+}
+
+function requirements_for_binary() {
+  install_kubectl
+  build_kwokctl
+  build_kwok
 }

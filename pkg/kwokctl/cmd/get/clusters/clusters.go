@@ -20,6 +20,7 @@ package clusters
 import (
 	"context"
 	"fmt"
+	"os"
 
 	"github.com/spf13/cobra"
 
@@ -34,7 +35,6 @@ func NewCommand(ctx context.Context) *cobra.Command {
 		Args:  cobra.NoArgs,
 		Use:   "clusters",
 		Short: "Lists existing clusters by their name",
-		Long:  "Lists existing clusters by their name",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runE(cmd.Context())
 		},
@@ -43,16 +43,17 @@ func NewCommand(ctx context.Context) *cobra.Command {
 }
 
 func runE(ctx context.Context) error {
-	clusters, err := runtime.ListClusters(config.ClustersDir)
+	clusters, err := runtime.ListClusters(ctx, config.ClustersDir)
 	if err != nil {
 		return err
 	}
 	if len(clusters) == 0 {
-		logger := log.FromContext(ctx)
-		logger.Info("No clusters found")
+		if log.IsTerminal() {
+			_, _ = fmt.Fprintf(os.Stderr, "No clusters found")
+		}
 	} else {
 		for _, cluster := range clusters {
-			fmt.Println(cluster)
+			_, _ = fmt.Println(cluster)
 		}
 	}
 	return nil

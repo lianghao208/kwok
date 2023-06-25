@@ -19,9 +19,8 @@ package controllers
 import (
 	"strconv"
 
-	"k8s.io/utils/strings/slices"
-
 	"sigs.k8s.io/kwok/pkg/apis/internalversion"
+	"sigs.k8s.io/kwok/pkg/utils/slices"
 )
 
 type jsonpathOperation struct {
@@ -100,7 +99,10 @@ func finalizersModify(metaFinalizers []string, finalizers *internalversion.Stage
 			ops = append(ops, finalizersAdd(metaFinalizers, finalizers.Add)...)
 		}
 	} else {
-		ops = append(ops, finalizersEmpty)
+		if len(metaFinalizers) != 0 {
+			ops = append(ops, finalizersEmpty)
+		}
+
 		if len(finalizers.Add) != 0 {
 			ops = append(ops, finalizersAdd(nil, finalizers.Add)...)
 		}

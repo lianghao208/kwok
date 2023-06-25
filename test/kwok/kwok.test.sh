@@ -38,7 +38,7 @@ function start_cluster() {
 
 # Check for normal heartbeat
 function test_node_ready() {
-  for i in {1..30}; do
+  for ((i = 0; i < 30; i++)); do
     if [[ ! "$(kubectl get node fake-node)" =~ "Ready" ]]; then
       echo "Waiting for fake-node to be ready..."
       sleep 1
@@ -54,10 +54,36 @@ function test_node_ready() {
   fi
 }
 
+# Check pod status
+function test_check_pod_status() {
+  _jq() {
+    echo "${row}" | base64 --decode | jq -r "${1}"
+  }
+  for row in $(kubectl get po -ojson | jq -r '.items[] | @base64'); do
+    pod_name=$(_jq '.metadata.name')
+    node_name=$(_jq '.spec.nodeName')
+    host_network=$(_jq '.spec.hostNetwork')
+    host_ip=$(_jq '.status.hostIP')
+    pod_ip=$(_jq '.status.podIP')
+    node_ip=$(kubectl get nodes "${node_name}" -ojson | jq -r '.status.addresses[] | select( .type == "InternalIP" ) | .address')
+    if [[ "${host_ip}" != "${node_ip}" ]]; then
+      echo "Error: ${pod_name} Pod: HostIP (${host_ip}) is not equal to the IP on its Node (${node_ip})"
+      return 1
+    fi
+    if [[ $host_network == "true" ]]; then
+      if [[ "${pod_ip}" != "${node_ip}" ]]; then
+        echo "Error: ${pod_name} Pod with hostNetwork=${host_network}: PodIP (${pod_ip}) and HostIP (${host_ip}) are not equal"
+        return 1
+      fi
+    fi
+  done
+  echo "Pod's status checked"
+}
+
 # Check for the Pod is running
 function test_pod_running() {
-  for i in {1..30}; do
-    if [[ ! "$(kubectl get pod | grep Running | wc -l)" -eq 5 ]]; then
+  for ((i = 0; i < 30; i++)); do
+    if [[ ! "$(kubectl get pod | grep -c Running)" -eq 5 ]]; then
       echo "Waiting all pods to be running..."
       sleep 1
     else
@@ -65,7 +91,7 @@ function test_pod_running() {
     fi
   done
 
-  if [[ ! "$(kubectl get pod | grep Running | wc -l)" -eq 5 ]]; then
+  if [[ ! "$(kubectl get pod | grep -c Running)" -eq 5 ]]; then
     echo "Error: Not all pods are running"
     kubectl get pod -o wide
     return 1
@@ -84,6 +110,7 @@ function test_modify_node_status() {
     kubectl get node fake-node
     return 1
   fi
+  kubectl annotate node fake-node --overwrite kwok.x-k8s.io/status-
 }
 
 # Check for the status of the Pod is modified by Kubectl
@@ -96,11 +123,34 @@ function test_modify_pod_status() {
 
   sleep 2
 
-  if [[ ! "$(kubectl get pod "${first_pod}" -o wide)" =~ "192.168.0.1" ]]; then
+  if [[ ! "$(kubectl get pod "${first_pod}" -o wide)" == *"192.168.0.1"* ]]; then
     echo "Error: fake-pod is not updated"
     kubectl get pod "${first_pod}" -o wide
     return 1
   fi
+
+  kubectl annotate pod "${first_pod}" --overwrite kwok.x-k8s.io/status-
+}
+
+function test_check_node_lease_transitions() {
+  local want="${1}"
+  local node_leases_transitions
+  node_leases_transitions="$(kubectl get leases fake-node -n kube-node-lease -ojson | jq -r '.spec.leaseTransitions // 0')"
+  if [[ "${node_leases_transitions}" != "${want}" ]]; then
+    echo "Error: fake-node lease transitions is not ${want}, got ${node_leases_transitions}"
+    return 1
+  fi
+}
+
+function recreate_kwok() {
+  kubectl scale deployment/kwok-controller -n kube-system --replicas=0
+  kubectl wait --for=delete pod -l app=kwok-controller -n kube-system --timeout=60s
+
+  kubectl scale deployment/kwok-controller -n kube-system --replicas=2
+}
+
+function recreate_pods() {
+  kubectl delete pod --all -n default
 }
 
 # Cleanup
@@ -118,9 +168,19 @@ function main() {
 
   test_node_ready || failed+=("node_ready")
   test_pod_running || failed+=("pod_running")
+  test_check_pod_status || failed+=("check_pod_status")
 
   test_modify_node_status || failed+=("modify_node_status")
   test_modify_pod_status || failed+=("modify_pod_status")
+  test_check_node_lease_transitions 0 || failed+=("check_node_lease_transitions")
+
+  recreate_kwok || failed+=("recreate_kwok")
+  recreate_pods || failed+=("recreate_pods")
+  test_node_ready || failed+=("node_ready_again")
+  test_pod_running || failed+=("pod_running_again")
+  test_check_pod_status || failed+=("check_pod_status_again")
+
+  test_check_node_lease_transitions 1 || failed+=("check_node_lease_transitions_again")
 
   if [[ "${#failed[@]}" -ne 0 ]]; then
     echo "Error: Some tests failed"

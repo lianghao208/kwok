@@ -17,25 +17,77 @@ limitations under the License.
 package path
 
 import (
+	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
+
+	"sigs.k8s.io/kwok/pkg/consts"
 )
 
-// ExpandHome expands home directory in file paths.
-func ExpandHome(path string) string {
-	if len(path) == 0 {
-		return path
+var (
+	homeDir string
+	workDir string
+)
+
+func init() {
+	dir, err := os.UserHomeDir()
+	if err != nil || dir == "" {
+		homeDir = os.TempDir()
+		workDir = Join(homeDir, consts.ProjectName)
+	} else {
+		homeDir = dir
+		workDir = Join(homeDir, "."+consts.ProjectName)
 	}
-	if path[0] != '~' {
-		return path
-	}
-	if len(path) > 1 && path[1] != '/' && path[1] != '\\' {
-		return path
+}
+
+// Home returns the home directory of the current user or a temporary directory.
+func Home() string {
+	return homeDir
+}
+
+// WorkDir returns the current working directory.
+func WorkDir() string {
+	return workDir
+}
+
+// Expand expands absolute directory in file paths.
+func Expand(path string) (string, error) {
+	if path == "" {
+		return "", fmt.Errorf("empty path")
 	}
 
-	home, err := os.UserHomeDir()
+	if path[0] == '~' {
+		home := Home()
+		if len(path) == 1 {
+			path = home
+		} else if path[1] == '/' || path[1] == '\\' {
+			path = Join(home, path[2:])
+		}
+	}
+
+	return filepath.Abs(path)
+}
+
+// RelFromHome returns a path relative to the home directory.
+// If the path is not relative to the home directory, the original path is returned.
+func RelFromHome(target string) string {
+	rel, err := filepath.Rel(Home(), target)
 	if err != nil {
-		return path
+		return target
 	}
+	if strings.HasPrefix(rel, "..") {
+		return target
+	}
+	return Join("~", rel)
+}
 
-	return Join(home, path[1:])
+// Join is a wrapper around filepath.Join.
+func Join(elem ...string) string {
+	return Clean(filepath.Join(elem...))
+}
+
+// Dir is a wrapper around filepath.Dir.
+func Dir(path string) string {
+	return filepath.Dir(path)
 }

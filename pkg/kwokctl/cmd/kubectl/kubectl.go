@@ -19,6 +19,7 @@ package kubectl
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 
@@ -40,9 +41,8 @@ func NewCommand(ctx context.Context) *cobra.Command {
 	flags := &flagpole{}
 
 	cmd := &cobra.Command{
-		Use:   "kubectl",
+		Use:   "kubectl [command]",
 		Short: "kubectl in cluster",
-		Long:  "kubectl in cluster",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			flags.Name = config.DefaultCluster
 			err := runE(cmd.Context(), flags, args)
@@ -66,14 +66,13 @@ func runE(ctx context.Context, flags *flagpole, args []string) error {
 
 	rt, err := runtime.DefaultRegistry.Load(ctx, name, workdir)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			logger.Warn("Cluster is not exists")
+		}
 		return err
 	}
 
-	err = rt.KubectlInCluster(ctx, exec.IOStreams{
-		In:     os.Stdin,
-		Out:    os.Stdout,
-		ErrOut: os.Stderr,
-	}, args...)
+	err = rt.KubectlInCluster(exec.WithStdIO(ctx), args...)
 
 	if err != nil {
 		return err

@@ -20,11 +20,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
-
 // KwokConfiguration provides configuration for the Kwok.
 type KwokConfiguration struct {
-	metav1.TypeMeta
 	// Standard list metadata.
 	// More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata
 	metav1.ObjectMeta
@@ -32,6 +29,7 @@ type KwokConfiguration struct {
 	Options KwokConfigurationOptions
 }
 
+// KwokConfigurationOptions holds information about the options.
 type KwokConfigurationOptions struct {
 	// The default IP assigned to the Pod on maintained Nodes.
 	CIDR string
@@ -81,4 +79,16 @@ type KwokConfigurationOptions struct {
 
 	// EnableProfiling enables /debug/pprof handler.
 	EnableProfilingHandler bool
+
+	// PodPlayStageParallelism is the number of PodPlayStages that are allowed to run in parallel.
+	PodPlayStageParallelism uint
+
+	// NodePlayStageParallelism is the number of NodePlayStages that are allowed to run in parallel.
+	NodePlayStageParallelism uint
+
+	// NodeLeaseDurationSeconds is the duration the Kubelet will set on its corresponding Lease.
+	NodeLeaseDurationSeconds uint
+
+	// NodeLeaseParallelism is the number of NodeLeases that are allowed to be processed in parallel.
+	NodeLeaseParallelism uint
 }

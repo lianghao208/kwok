@@ -13,11 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+set -o errexit
+set -o nounset
+set -o pipefail
+
 DIR="$(dirname "${BASH_SOURCE[0]}")"
 DIR="$(realpath "${DIR}")"
 ROOT_DIR="$(realpath "${DIR}/../..")"
-DOCKERFILE="$(realpath "${DIR}/Dockerfile" --relative-to="${ROOT_DIR}")"
+DOCKERFILE="$(echo "${DIR}/Dockerfile" | sed "s|^${ROOT_DIR}/|./|")"
 
+BASE_IMAGE=
 DRY_RUN=false
 PUSH=false
 IMAGES=()
@@ -25,9 +30,10 @@ EXTRA_TAGS=()
 PLATFORMS=()
 VERSION=""
 STAGING_PREFIX=""
+BUILDER="docker"
 
 function usage() {
-  echo "Usage: ${0} [--help] [--version <version>] [--image <image> ...] [--extra-tag <extra-tag> ...] [--staging-prefix <staging-prefix>] [--platform <platform> ...] [--push] [--dry-run]"
+  echo "Usage: ${0} [--help] [--version <version>] [--image <image> ...] [--extra-tag <extra-tag> ...] [--staging-prefix <staging-prefix>] [--platform <platform> ...] [--push] [--dry-run] [--builder <builder>]"
   echo "  --version <version> is kwok version, is required"
   echo "  --image <image> is image, is required"
   echo "  --extra-tag <extra-tag> is extra tag"
@@ -35,6 +41,8 @@ function usage() {
   echo "  --platform <platform> is multi-platform capable for image"
   echo "  --push will push image to registry"
   echo "  --dry-run just show what would be done"
+  echo "  --builder <builder> specify image builder, default: ${BUILDER}. available options: docker, nerdctl, podman"
+  echo "  --base-image <base-image> specify base image, default: ${BASE_IMAGE}"
 }
 
 function args() {
@@ -43,31 +51,39 @@ function args() {
     arg="$1"
     case "${arg}" in
     --version | --version=*)
-      [[ "${arg#*=}" != "${arg}" ]] && VERSION="${arg#*=}" || { VERSION="${2}" && shift; }
+      [[ "${arg#*=}" != "${arg}" ]] && VERSION="${arg#*=}" || { VERSION="${2}" && shift; } || :
       shift
       ;;
     --image | --image=*)
-      [[ "${arg#*=}" != "${arg}" ]] && IMAGES+=("${arg#*=}") || { IMAGES+=("${2}") && shift; }
+      [[ "${arg#*=}" != "${arg}" ]] && IMAGES+=("${arg#*=}") || { IMAGES+=("${2}") && shift; } || :
       shift
       ;;
     --extra-tag | --extra-tag=*)
-      [[ "${arg#*=}" != "${arg}" ]] && EXTRA_TAGS+=("${arg#*=}") || { EXTRA_TAGS+=("${2}") && shift; }
+      [[ "${arg#*=}" != "${arg}" ]] && EXTRA_TAGS+=("${arg#*=}") || { EXTRA_TAGS+=("${2}") && shift; } || :
       shift
       ;;
     --staging-prefix | --staging-prefix=*)
-      [[ "${arg#*=}" != "${arg}" ]] && STAGING_PREFIX="${arg#*=}" || { STAGING_PREFIX="${2}" && shift; }
+      [[ "${arg#*=}" != "${arg}" ]] && STAGING_PREFIX="${arg#*=}" || { STAGING_PREFIX="${2}" && shift; } || :
       shift
       ;;
     --platform | --platform=*)
-      [[ "${arg#*=}" != "${arg}" ]] && PLATFORMS+=("${arg#*=}") || { PLATFORMS+=("${2}") && shift; }
+      [[ "${arg#*=}" != "${arg}" ]] && PLATFORMS+=("${arg#*=}") || { PLATFORMS+=("${2}") && shift; } || :
       shift
       ;;
     --push | --push=*)
-      [[ "${arg#*=}" != "${arg}" ]] && PUSH="${arg#*=}" || PUSH="true"
+      [[ "${arg#*=}" != "${arg}" ]] && PUSH="${arg#*=}" || PUSH="true" || :
       shift
       ;;
     --dry-run | --dry-run=*)
-      [[ "${arg#*=}" != "${arg}" ]] && DRY_RUN="${arg#*=}" || DRY_RUN="true"
+      [[ "${arg#*=}" != "${arg}" ]] && DRY_RUN="${arg#*=}" || DRY_RUN="true" || :
+      shift
+      ;;
+    --builder | --builder=*)
+      [[ "${arg#*=}" != "${arg}" ]] && BUILDER="${arg#*=}" || { BUILDER="${2}" && shift; } || :
+      shift
+      ;;
+    --base-image | --base-image=*)
+      [[ "${arg#*=}" != "${arg}" ]] && BASE_IMAGE="${arg#*=}" || { BASE_IMAGE="${2}" && shift; } || :
       shift
       ;;
     --help)
@@ -94,7 +110,7 @@ function args() {
     exit 1
   fi
 
-  if [[ "${#PLATFORMS}" -eq 0 ]]; then
+  if [[ "${#PLATFORMS[*]}" -eq 0 ]]; then
     PLATFORMS+=(
       linux/amd64
     )
@@ -102,49 +118,95 @@ function args() {
 }
 
 function dry_run() {
-  echo "${@}"
+  echo "$*"
   if [[ "${DRY_RUN}" != "true" ]]; then
-    eval "${@}"
+    eval "$*"
   fi
 }
 
 function main() {
   local extra_args
+  local platform_args
+  local images
   local tag
 
   extra_args=()
+  images=()
   for image in "${IMAGES[@]}"; do
     tag="${VERSION}"
     if [[ "${STAGING_PREFIX}" != "" ]]; then
       tag="${STAGING_PREFIX}-${VERSION}"
     fi
-    extra_args+=(
-      "--tag=${image}:${tag}"
-    )
+    extra_args+=("--tag=${image}:${tag}")
+    images+=("${image}:${tag}")
+
     if [[ "${#EXTRA_TAGS[@]}" -ne 0 ]]; then
       for extra_tag in "${EXTRA_TAGS[@]}"; do
         tag="${extra_tag}"
         if [[ "${STAGING_PREFIX}" != "" ]]; then
           tag="${STAGING_PREFIX}-${extra_tag}"
         fi
-        extra_args+=(
-          "--tag=${image}:${tag}"
-        )
+        extra_args+=("--tag=${image}:${tag}")
+        images+=("${image}:${tag}")
       done
     fi
   done
 
-  for platform in "${PLATFORMS[@]}"; do
-    extra_args+=(
-      "--platform=${platform}"
-    )
-  done
-  if [[ "${PUSH}" == "true" ]]; then
-    extra_args+=("--push")
-  else
-    extra_args+=("--load")
+  if [[ "${BASE_IMAGE}" != "" ]]; then
+    extra_args+=("--build-arg=BASE_IMAGE=${BASE_IMAGE}")
   fi
+
+  for platform in "${PLATFORMS[@]}"; do
+    extra_args+=("--platform=${platform}")
+    platform_args+=("--platform=${platform}")
+  done
+
+  if [[ "${BUILDER}" == "nerdctl" ]]; then
+    build_with_nerdctl "${extra_args[@]}"
+    if [[ "${PUSH}" == "true" ]]; then
+      for image in "${images[@]}"; do
+        dry_run nerdctl push "${platform_args[@]}" "${image}"
+      done
+    fi
+  elif [[ "${BUILDER}" == "podman" ]]; then
+    build_with_podman "${extra_args[@]}"
+    if [[ "${PUSH}" == "true" ]]; then
+      for image in "${images[@]}"; do
+        dry_run podman push "${platform_args[@]}" "${image}"
+      done
+    fi
+  else
+    if [[ "${PUSH}" == "true" ]]; then
+      extra_args+=("--push")
+    else
+      extra_args+=("--load")
+    fi
+    build_with_docker "${extra_args[@]}"
+  fi
+}
+
+function build_with_docker() {
+  local extra_args
+  extra_args=("$@")
   dry_run docker buildx build \
+    "${extra_args[@]}" \
+    -f "${DOCKERFILE}" \
+    .
+}
+
+function build_with_nerdctl() {
+  local extra_args
+  extra_args=("$@")
+  dry_run nerdctl build \
+    "${extra_args[@]}" \
+    -f "${DOCKERFILE}" \
+    .
+}
+
+function build_with_podman() {
+  local extra_args
+  extra_args=("$@")
+  dry_run podman build \
     "${extra_args[@]}" \
     -f "${DOCKERFILE}" \
     .

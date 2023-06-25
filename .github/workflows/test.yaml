@@ -8,38 +8,74 @@ env:
   DOCKER_CLI_EXPERIMENTAL: "enabled"
   CGO_ENABLED: "0"
 
+# https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions#concurrency
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
-  test-build:
+  check-site:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
+      - name: Check site
+        shell: bash
+        run: |
+          make -C site check
+
+  test-build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        builder:
+          - docker
+          - nerdctl
+          - podman
+    steps:
+      - uses: actions/checkout@v3
       - name: Set up Go
-        uses: actions/setup-go@v2
+        uses: actions/setup-go@v4
         with:
-          go-version: 1.19
+          go-version: "1.20"
+
+      - name: Test
+        shell: bash
+        run: |
+          ./hack/e2e-test.sh release/build
 
       - name: Build
+        shell: bash
         run: |
           make build
+
+      - name: Install Nerdctl and Start Containerd
+        if: ${{ matrix.builder == 'nerdctl' }}
+        shell: bash
+        run: |
+          curl -sSL https://github.com/containerd/nerdctl/releases/download/v1.3.1/nerdctl-full-1.3.1-linux-amd64.tar.gz -o - | sudo tar -xz -C /usr/local
+          sudo systemctl daemon-reload
+          sudo systemctl enable --now containerd
+          containerd-rootless-setuptool.sh install
+          containerd-rootless-setuptool.sh install-buildkit-containerd
 
       - name: Build Image
         shell: bash
         run: |
-          make build-image
+          BUILDER=${{ matrix.builder }} make build-image
 
       - name: Build Cluster Image
         shell: bash
         run: |
-          make build-cluster-image
+          BUILDER=${{ matrix.builder }} make build-cluster-image
 
   test-kwok:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
       - name: Set up Go
-        uses: actions/setup-go@v2
+        uses: actions/setup-go@v4
         with:
-          go-version: 1.19
+          go-version: "1.20"
 
       - name: Install Kind
         shell: bash
@@ -63,9 +99,9 @@ jobs:
     steps:
       - uses: actions/checkout@v3
       - name: Set up Go
-        uses: actions/setup-go@v2
+        uses: actions/setup-go@v4
         with:
-          go-version: 1.19
+          go-version: "1.20"
 
       - name: Install Kind
         shell: bash
@@ -85,11 +121,6 @@ jobs:
           ./hack/e2e-test.sh kwok-with-cni/kwok-with-cni
 
   test-kwokctl:
-    # https://docs.github.com/en/actions/using-jobs/using-concurrency
-    concurrency:
-      group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}-${{ matrix.os }}-${{ matrix.kwokctl-runtime }}
-      cancel-in-progress: true
-
     # https://docs.github.com/en/actions/using-jobs/using-a-matrix-for-your-jobs
     strategy:
       fail-fast: false
@@ -103,55 +134,83 @@ jobs:
         kwokctl-runtime:
           - binary
           - docker
-          - nerdctl
+          - podman
           - kind
+          - kind-podman
         exclude:
-          # No binary is provided by default for control plane components outside of Linux
-          # https://www.downloadkubernetes.com
-          # TODO: we can build the required binary
           - os: macos-latest
-            kwokctl-runtime: binary
+            kwokctl-runtime: podman
           - os: macos-latest
+            kwokctl-runtime: kind-podman
+        include:
+          # nerdctl is still very early and has many bugs and differences in docker behavior,
+          # so we need to verify that it works on every release.
+          - os: ubuntu-latest
             kwokctl-runtime: nerdctl
+            nerdctl-version: 1.4.0
+          - os: ubuntu-latest
+            kwokctl-runtime: nerdctl
+            nerdctl-version: 1.3.1
+          - os: ubuntu-latest
+            kwokctl-runtime: nerdctl
+            nerdctl-version: 1.2.1
+          - os: ubuntu-latest
+            kwokctl-runtime: nerdctl
+            nerdctl-version: 1.1.0
 
     continue-on-error: false
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v3
       - name: Set up Go
-        uses: actions/setup-go@v2
+        uses: actions/setup-go@v4
         with:
-          go-version: 1.19
+          go-version: "1.20"
 
       - name: Install CoreUtils for MacOS
-        if: ${{ matrix.os == 'macos-latest' && matrix.kwokctl-runtime != 'binary' }}
+        if: ${{ matrix.os == 'macos-latest' }}
         shell: bash
         run: |
-          brew install coreutils
+          brew install coreutils bash
+
+        # No binary is provided by default for control plane components outside of Linux
+        # https://www.downloadkubernetes.com
+      - name: Download Kubernetes Source Code
+        uses: actions/checkout@v3
+        if: ${{ matrix.kwokctl-runtime == 'binary' && matrix.os == 'macos-latest' }}
+        with:
+          repository: kubernetes/kubernetes
+          path: kubernetes
+          ref: v1.27.3
+      - name: Build Kubernetes Binary
+        if: ${{ matrix.kwokctl-runtime == 'binary' && matrix.os == 'macos-latest' }}
+        shell: bash
+        run: |
+          cd "${GITHUB_WORKSPACE}/kubernetes" && make WHAT="cmd/kube-apiserver cmd/kube-controller-manager cmd/kube-scheduler"
+          mkdir -p ~/.kwok
+          cat > ~/.kwok/kwok.yaml << EOF
+          kind: KwokctlConfiguration
+          apiVersion: config.kwok.x-k8s.io/v1alpha1
+          options:
+            kubeBinaryPrefix: "${GITHUB_WORKSPACE}/kubernetes/_output/bin"
+          EOF
 
       - name: Install Docker for MacOS
-        if: ${{ matrix.os == 'macos-latest' && matrix.kwokctl-runtime != 'binary' }}
+        if: ${{ matrix.os == 'macos-latest' && ( matrix.kwokctl-runtime == 'docker' || matrix.kwokctl-runtime == 'kind' ) }}
         shell: bash
         run: |
           brew install colima docker
-          colima start --mount $HOME/.kwok/:w
+          colima start --mount $HOME/.kwok/:w --mount $(pwd):w --mount-type virtiofs
 
       - name: Install Buildx
-        if: ${{ matrix.kwokctl-runtime != 'binary' }}
+        if: ${{ matrix.kwokctl-runtime == 'docker' || matrix.kwokctl-runtime == 'kind' }}
         shell: bash
         run: |
           ./hack/requirements.sh buildx
           docker buildx version
 
-      - name: Install Docker Compose V2
-        if: ${{ matrix.kwokctl-runtime == 'docker' }}
-        shell: bash
-        run: |
-          ./hack/requirements.sh compose
-           docker compose version
-
       - name: Docker Info
-        if: ${{ matrix.kwokctl-runtime != 'binary' }}
+        if: ${{ matrix.kwokctl-runtime == 'docker' || matrix.kwokctl-runtime == 'kind' }}
         shell: bash
         run: |
           docker info
@@ -160,10 +219,24 @@ jobs:
         if: ${{ matrix.kwokctl-runtime == 'nerdctl' }}
         shell: bash
         run: |
-          curl -sSL https://github.com/containerd/nerdctl/releases/download/v1.1.0/nerdctl-full-1.1.0-linux-amd64.tar.gz -o - | sudo tar -xz -C /usr/local
+          sudo mkdir -p /etc/cni/net.d
+          sudo chmod 777 /etc/cni/net.d
+          curl -sSL https://github.com/containerd/nerdctl/releases/download/v${{ matrix.nerdctl-version }}/nerdctl-full-${{ matrix.nerdctl-version }}-linux-amd64.tar.gz -o - | sudo tar -xz -C /usr/local
           sudo systemctl daemon-reload
           sudo systemctl enable --now containerd
           containerd-rootless-setuptool.sh install
+          containerd-rootless-setuptool.sh install-buildkit-containerd
+
+      - name: Setup Podman For Kind
+        if: ${{ matrix.kwokctl-runtime == 'kind-podman' }}
+        shell: bash
+        run: |
+          sudo mkdir -p /etc/systemd/system/user@.service.d
+          sudo tee <<EOF /etc/systemd/system/user@.service.d/delegate.conf
+          [Service]
+          Delegate=yes
+          EOF
+          sudo systemctl daemon-reload
 
       - name: Make pki directory
         if: ${{ matrix.kwokctl-runtime == 'binary' }}
@@ -181,14 +254,16 @@ jobs:
       - name: Test Workable
         shell: bash
         run: |
-          if [[ "${{ matrix.kwokctl-runtime }}" == "kind" ]]; then
-            export LAST_RELEASE_SIZE=1
-          elif [[ "${{ matrix.kwokctl-runtime }}" == "binary" || "${{ matrix.kwokctl-runtime }}" == "docker" ]]; then
+          if [[ "${{ matrix.os }}" == "ubuntu-latest" && ( "${{ matrix.kwokctl-runtime }}" == "binary" || "${{ matrix.kwokctl-runtime }}" == "docker" ) ]]; then
             export LAST_RELEASE_SIZE=20
-          else
-            export LAST_RELEASE_SIZE=6
           fi
           ./hack/e2e-test.sh kwokctl/kwokctl_${{ matrix.kwokctl-runtime }}
+
+      - name: Test Multi Cluster
+        if: ${{ matrix.os == 'ubuntu-latest' }}
+        shell: bash
+        run: |
+          ./hack/e2e-test.sh kwokctl/kwokctl_${{ matrix.kwokctl-runtime }}_multi_cluster
 
       - name: Test Snapshot
         shell: bash
@@ -199,6 +274,12 @@ jobs:
         shell: bash
         run: |
           ./hack/e2e-test.sh kwokctl/kwokctl_${{ matrix.kwokctl-runtime }}_audit
+
+      - name: Test Verbosity
+        if: ${{ matrix.os == 'ubuntu-latest' || matrix.kwokctl-runtime != 'binary' }}
+        shell: bash
+        run: |
+          ./hack/e2e-test.sh kwokctl/kwokctl_${{ matrix.kwokctl-runtime }}_verbosity
 
       - name: Test Scheduler
         shell: bash
@@ -215,8 +296,65 @@ jobs:
         run: |
           ./hack/e2e-test.sh kwokctl/kwokctl_${{ matrix.kwokctl-runtime }}_restart
 
-      - name: Test Benchmark
+      - name: Test Port Forward
         shell: bash
-        continue-on-error: true
+        run: |
+          ./hack/e2e-test.sh kwokctl/kwokctl_${{ matrix.kwokctl-runtime }}_port_forward
+
+      - name: Test Exec
+        shell: bash
+        run: |
+          ./hack/e2e-test.sh kwokctl/kwokctl_${{ matrix.kwokctl-runtime }}_exec
+
+      - name: Test Log
+        shell: bash
+        run: |
+          ./hack/e2e-test.sh kwokctl/kwokctl_${{ matrix.kwokctl-runtime }}_logs
+
+      - name: Test Export Logs
+        shell: bash
+        run: |
+          ./hack/e2e-test.sh kwokctl/kwokctl_${{ matrix.kwokctl-runtime }}_export_logs
+
+      - name: Test Attach
+        shell: bash
+        run: |
+          ./hack/e2e-test.sh kwokctl/kwokctl_${{ matrix.kwokctl-runtime }}_attach
+
+      - name: Test Extra
+        shell: bash
+        run: |
+          ./hack/e2e-test.sh kwokctl/kwokctl_${{ matrix.kwokctl-runtime }}_extra
+
+      - name: Test Metrics
+        shell: bash
+        run: |
+          ./hack/e2e-test.sh kwokctl/kwokctl_${{ matrix.kwokctl-runtime }}_metric
+
+      - name: Test Benchmark
+        if: ${{ matrix.os == 'ubuntu-latest' && matrix.kwokctl-runtime != 'kind' && matrix.kwokctl-runtime != 'kind-podman' }}
+        shell: bash
         run: |
           ./hack/e2e-test.sh kwokctl/kwokctl_${{ matrix.kwokctl-runtime }}_benchmark
+
+      - name: Test Auto Detect
+        if: ${{ matrix.kwokctl-runtime == 'binary' }}
+        shell: bash
+        run: |
+          ./hack/e2e-test.sh kwokctl/kwokctl_auto_detect
+
+      - name: Test Mode StableFeatureGateAndAPI
+        if: ${{ matrix.os == 'ubuntu-latest' && matrix.kwokctl-runtime == 'binary' }}
+        shell: bash
+        env:
+          LAST_RELEASE_SIZE: 20
+          KWOK_MODE: StableFeatureGateAndAPI
+        run: |
+          ./hack/e2e-test.sh kwokctl/kwokctl_${{ matrix.kwokctl-runtime }}
+
+      - name: Upload logs
+        uses: actions/upload-artifact@v3
+        if: failure()
+        with:
+          name: kwok-logs-${{ github.run_id }}-${{ matrix.os }}-${{ matrix.kwokctl-runtime }}${{ matrix.nerdctl-version && '-nerdctl' || '' }}${{ matrix.nerdctl-version }}
+          path: /tmp/kwok/logs

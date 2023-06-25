@@ -21,6 +21,8 @@ import (
 	"fmt"
 	"text/template"
 
+	"sigs.k8s.io/kwok/pkg/apis/internalversion"
+
 	_ "embed"
 )
 
@@ -29,6 +31,7 @@ var prometheusYamlTpl string
 
 var prometheusYamlTemplate = template.Must(template.New("_").Parse(prometheusYamlTpl))
 
+// BuildPrometheus builds the prometheus yaml content.
 func BuildPrometheus(conf BuildPrometheusConfig) (string, error) {
 	buf := bytes.NewBuffer(nil)
 	err := prometheusYamlTemplate.Execute(buf, conf)
@@ -38,6 +41,7 @@ func BuildPrometheus(conf BuildPrometheusConfig) (string, error) {
 	return buf.String(), nil
 }
 
+// BuildPrometheusConfig is the configuration for building the prometheus config
 type BuildPrometheusConfig struct {
 	ProjectName               string
 	SecurePort                bool
@@ -49,4 +53,5 @@ type BuildPrometheusConfig struct {
 	KubeControllerManagerPort uint32
 	KubeSchedulerPort         uint32
 	KwokControllerPort        uint32
+	Metrics                   []*internalversion.Metric
 }

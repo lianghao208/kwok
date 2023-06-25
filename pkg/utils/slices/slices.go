@@ -45,3 +45,51 @@ func Filter[S ~[]T, T any](s S, f func(T) bool) []T {
 	}
 	return out
 }
+
+// Contains returns true if the slice contains the given element.
+func Contains[S ~[]T, T comparable](s S, t T) bool {
+	for _, v := range s {
+		if v == t {
+			return true
+		}
+	}
+	return false
+}
+
+// Unique returns a new slice containing only the unique elements in the slice.
+func Unique[S ~[]T, T comparable](s S) []T {
+	if len(s) <= 1 {
+		return s
+	}
+	exist := make(map[T]struct{})
+	out := make([]T, 0, len(s))
+	for _, v := range s {
+		if _, ok := exist[v]; !ok {
+			exist[v] = struct{}{}
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// Equal returns true if the two slices are equal.
+func Equal[S ~[]T, T comparable](s1, s2 S) bool {
+	if len(s1) != len(s2) {
+		return false
+	}
+	for i := range s1 {
+		if s1[i] != s2[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// Reverse returns a new slice containing the elements of the slice in reverse order.
+func Reverse[S ~[]T, T any](s S) []T {
+	out := make([]T, len(s))
+	for i := range s {
+		out[len(s)-1-i] = s[i]
+	}
+	return out
+}

@@ -21,10 +21,11 @@ source "${DIR}/helper.sh"
 
 function main() {
   local all_releases=("${@}")
-  build_kwokctl
-  build_image
 
   test_all "docker" "benchmark" "${all_releases[@]}" || exit 1
 }
 
-main $(supported_releases)
+requirements
+
+mapfile -t releases < <(supported_releases)
+main "${releases[@]}"

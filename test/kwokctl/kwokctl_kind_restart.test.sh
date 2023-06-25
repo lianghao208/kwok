@@ -17,25 +17,15 @@ DIR="$(dirname "${BASH_SOURCE[0]}")"
 
 DIR="$(realpath "${DIR}")"
 
-ROOT_DIR="$(realpath "${DIR}/../..")"
-
 source "${DIR}/helper.sh"
-source "${ROOT_DIR}/hack/requirements.sh"
-
-function requirements() {
-  install_kubectl
-  install_buildx
-  install_kind
-}
 
 function main() {
   local all_releases=("${@}")
-  build_kwokctl
-  build_image
 
   test_all "kind" "restart" "${all_releases[@]}" || exit 1
 }
 
 requirements
 
-main $(supported_releases)
+mapfile -t releases < <(supported_releases)
+main "${releases[@]}"

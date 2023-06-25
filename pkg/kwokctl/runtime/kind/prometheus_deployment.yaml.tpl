@@ -77,6 +77,17 @@ data:
         static_configs:
           - targets:
               - "localhost:10247"
+      {{ range .Metrics }}
+      - job_name: "kwok-metric-{{ .Name }}"
+        scheme: http
+        honor_timestamps: true
+        metrics_path: {{ .Spec.Path }}
+        follow_redirects: true
+        enable_http2: true
+        static_configs:
+        - targets:
+            - "localhost:10247"
+      {{ end }}
       - job_name: "kube-apiserver"
         scheme: https
         honor_timestamps: true
@@ -124,8 +135,13 @@ spec:
     - name: prometheus
       image: {{ .PrometheusImage }}
       args:
-        - --config.file
-        - /etc/prometheus/prometheus.yaml
+        - --config.file=/etc/prometheus/prometheus.yaml
+        {{ if .LogLevel }}
+        - --log.level={{ .LogLevel }}
+        {{ end }}
+        {{ range .ExtraArgs }}
+        - --{{ .Key }}={{ .Value }}
+        {{ end }}
       ports:
         - name: web
           containerPort: 9090
@@ -138,6 +154,11 @@ spec:
         - mountPath: /etc/kubernetes/pki
           name: k8s-certs
           readOnly: true
+        {{ range .ExtraVolumes }}
+        - mountPath: {{ .MountPath }}
+          name: {{ .Name }}
+          readOnly: {{ .ReadOnly }}
+        {{ end }}
   volumes:
     - name: config-volume
       configMap:
@@ -146,6 +167,12 @@ spec:
         path: /etc/kubernetes/pki
         type: DirectoryOrCreate
       name: k8s-certs
+    {{ range .ExtraVolumes }}
+    - hostPath:
+        path: {{ .HostPath }}
+        type: {{ .PathType }}
+      name: {{ .Name }}
+    {{ end }}
   serviceAccount: prometheus
   serviceAccountName: prometheus
   restartPolicy: Always

@@ -13,15 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-KIND_VERSION=0.14.0
+KIND_VERSION=0.19.0
 
-KUBE_VERSION=1.24.2
+KUBE_VERSION=1.27.3
 
-BUILDX_VERSION=0.8.2
-
-COMPOSE_VERSION=2.10.1
-
-NERDCTL_VERSION=1.0.0
+# TODO: Stay at 0.9 in figuring out the Attestations of buildx.
+# https://github.com/docker/buildx/pull/1412
+BUILDX_VERSION=0.9.1
 
 function command_exist() {
   local command="${1}"
@@ -149,44 +147,6 @@ function install_buildx() {
   fi
 }
 
-function install_compose() {
-  local binary
-
-  if docker compose version; then
-    return 0
-  fi
-
-  binary="$(runtime_home)/.docker/cli-plugins/docker-compose"
-
-  mkdir -p "$(dirname "${binary}")" &&
-    wget -O "${binary}" "https://github.com/docker/compose/releases/download/v${COMPOSE_VERSION}/docker-compose-$(runtime_os)-$(runtime_arch_alias)" &&
-    chmod +x "${binary}"
-
-  if ! docker compose version; then
-    echo docker-compose is installed but not effective >&2
-    return 1
-  fi
-}
-
-function install_nerdctl() {
-  if command_exist nerdctl; then
-    return 0
-  fi
-
-  wget -O /tmp/nerdctl.tar.gz "https://github.com/containerd/nerdctl/releases/download/v${NERDCTL_VERSION}/nerdctl-full-${NERDCTL_VERSION}-$(runtime_os)-$(runtime_arch).tar.gz"
-  tar xvf /tmp/nerdctl.tar.gz -C /usr/local/
-
-  containerd-rootless-setuptool.sh install
-  rm /tmp/nerdctl.tar.gz
-
-  if ! command_exist nerdctl; then
-    echo nerdctl is installed but not effective >&2
-    return 1
-  fi
-
-  nerdctl version
-}
-
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   function usage() {
     local requirements=(
@@ -194,7 +154,6 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
       kubectl
       kind
       buildx
-      compose
     )
     echo "Usage: ${0} [flags] [requirements]"
     echo "  Empty argument will install all requirements."

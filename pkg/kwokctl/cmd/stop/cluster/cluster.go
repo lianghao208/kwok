@@ -14,10 +14,14 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Package cluster implements the stop cluster command
 package cluster
 
 import (
 	"context"
+	"errors"
+	"os"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -38,7 +42,6 @@ func NewCommand(ctx context.Context) *cobra.Command {
 		Args:  cobra.NoArgs,
 		Use:   "cluster",
 		Short: "Stop a cluster",
-		Long:  "Stop a cluster",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			flags.Name = config.DefaultCluster
 			return runE(cmd.Context(), flags)
@@ -58,15 +61,20 @@ func runE(ctx context.Context, flags *flagpole) error {
 
 	rt, err := runtime.DefaultRegistry.Load(ctx, name, workdir)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			logger.Warn("Cluster is not exists")
+		}
 		return err
 	}
 
-	logger.Info("Stopping cluster")
+	start := time.Now()
+	logger.Info("Cluster is stopping")
 	err = rt.Stop(ctx)
 	if err != nil {
 		return err
 	}
-
-	logger.Info("Cluster stopped")
+	logger.Info("Cluster is stopped",
+		"elapsed", time.Since(start),
+	)
 	return nil
 }

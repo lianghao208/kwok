@@ -17,33 +17,42 @@ limitations under the License.
 package components
 
 import (
+	"time"
+
 	"sigs.k8s.io/kwok/pkg/apis/internalversion"
+	"sigs.k8s.io/kwok/pkg/consts"
+	"sigs.k8s.io/kwok/pkg/log"
 	"sigs.k8s.io/kwok/pkg/utils/format"
 	"sigs.k8s.io/kwok/pkg/utils/version"
 )
 
+// BuildKubeControllerManagerComponentConfig is the configuration for building a kube-controller-manager component.
 type BuildKubeControllerManagerComponentConfig struct {
-	Binary            string
-	Image             string
-	Version           version.Version
-	Workdir           string
-	Address           string
-	Port              uint32
-	SecurePort        bool
-	CaCertPath        string
-	AdminCertPath     string
-	AdminKeyPath      string
-	KubeAuthorization bool
-	KubeconfigPath    string
-	KubeFeatureGates  string
+	Binary                             string
+	Image                              string
+	Version                            version.Version
+	Workdir                            string
+	BindAddress                        string
+	Port                               uint32
+	SecurePort                         bool
+	CaCertPath                         string
+	AdminCertPath                      string
+	AdminKeyPath                       string
+	KubeAuthorization                  bool
+	KubeconfigPath                     string
+	KubeFeatureGates                   string
+	NodeMonitorPeriodMilliseconds      int64
+	NodeMonitorGracePeriodMilliseconds int64
+	Verbosity                          log.Level
+	DisableQPSLimits                   bool
+	ExtraArgs                          []internalversion.ExtraArgs
+	ExtraVolumes                       []internalversion.Volume
 }
 
+// BuildKubeControllerManagerComponent builds a kube-controller-manager component.
 func BuildKubeControllerManagerComponent(conf BuildKubeControllerManagerComponentConfig) (component internalversion.Component, err error) {
-	if conf.Address == "" {
-		conf.Address = publicAddress
-	}
-
 	kubeControllerManagerArgs := []string{}
+	kubeControllerManagerArgs = append(kubeControllerManagerArgs, extraArgsToStrings(conf.ExtraArgs)...)
 
 	if conf.KubeFeatureGates != "" {
 		kubeControllerManagerArgs = append(kubeControllerManagerArgs,
@@ -51,14 +60,33 @@ func BuildKubeControllerManagerComponent(conf BuildKubeControllerManagerComponen
 		)
 	}
 
+	if conf.NodeMonitorPeriodMilliseconds > 0 {
+		kubeControllerManagerArgs = append(kubeControllerManagerArgs,
+			"--node-monitor-period="+format.String(time.Duration(conf.NodeMonitorPeriodMilliseconds)*time.Millisecond),
+		)
+	}
+
+	if conf.NodeMonitorGracePeriodMilliseconds > 0 {
+		kubeControllerManagerArgs = append(kubeControllerManagerArgs,
+			"--node-monitor-grace-period="+format.String(time.Duration(conf.NodeMonitorGracePeriodMilliseconds)*time.Millisecond),
+		)
+	}
+
 	inContainer := conf.Image != ""
 	var volumes []internalversion.Volume
+	volumes = append(volumes, conf.ExtraVolumes...)
+	var ports []internalversion.Port
 
 	if inContainer {
 		volumes = append(volumes,
 			internalversion.Volume{
 				HostPath:  conf.KubeconfigPath,
 				MountPath: "/root/.kube/config",
+				ReadOnly:  true,
+			},
+			internalversion.Volume{
+				HostPath:  conf.CaCertPath,
+				MountPath: "/etc/kubernetes/pki/ca.crt",
 				ReadOnly:  true,
 			},
 			internalversion.Volume{
@@ -82,7 +110,7 @@ func BuildKubeControllerManagerComponent(conf BuildKubeControllerManagerComponen
 	}
 
 	if conf.SecurePort {
-		if conf.Version.GE(version.NewVersion(1, 12, 0)) {
+		if conf.Version.GE(version.NewVersion(1, 13, 0)) {
 			kubeControllerManagerArgs = append(kubeControllerManagerArgs,
 				"--authorization-always-allow-paths=/healthz,/readyz,/livez,/metrics",
 			)
@@ -90,12 +118,21 @@ func BuildKubeControllerManagerComponent(conf BuildKubeControllerManagerComponen
 
 		if inContainer {
 			kubeControllerManagerArgs = append(kubeControllerManagerArgs,
-				"--bind-address="+publicAddress,
+				"--bind-address="+conf.BindAddress,
 				"--secure-port=10257",
 			)
+			if conf.Port > 0 {
+				ports = append(
+					ports,
+					internalversion.Port{
+						HostPort: conf.Port,
+						Port:     10257,
+					},
+				)
+			}
 		} else {
 			kubeControllerManagerArgs = append(kubeControllerManagerArgs,
-				"--bind-address="+conf.Address,
+				"--bind-address="+conf.BindAddress,
 				"--secure-port="+format.String(conf.Port),
 			)
 		}
@@ -107,12 +144,21 @@ func BuildKubeControllerManagerComponent(conf BuildKubeControllerManagerComponen
 	} else {
 		if inContainer {
 			kubeControllerManagerArgs = append(kubeControllerManagerArgs,
-				"--address="+publicAddress,
+				"--address="+conf.BindAddress,
 				"--port=10252",
 			)
+			if conf.Port > 0 {
+				ports = append(
+					ports,
+					internalversion.Port{
+						HostPort: conf.Port,
+						Port:     10252,
+					},
+				)
+			}
 		} else {
 			kubeControllerManagerArgs = append(kubeControllerManagerArgs,
-				"--address="+conf.Address,
+				"--address="+conf.BindAddress,
 				"--port="+format.String(conf.Port),
 			)
 		}
@@ -124,13 +170,6 @@ func BuildKubeControllerManagerComponent(conf BuildKubeControllerManagerComponen
 
 	if conf.KubeAuthorization {
 		if inContainer {
-			volumes = append(volumes,
-				internalversion.Volume{
-					HostPath:  conf.CaCertPath,
-					MountPath: "/etc/kubernetes/pki/ca.crt",
-					ReadOnly:  true,
-				},
-			)
 			kubeControllerManagerArgs = append(kubeControllerManagerArgs,
 				"--root-ca-file=/etc/kubernetes/pki/ca.crt",
 				"--service-account-private-key-file=/etc/kubernetes/pki/admin.key",
@@ -143,6 +182,17 @@ func BuildKubeControllerManagerComponent(conf BuildKubeControllerManagerComponen
 		}
 	}
 
+	if conf.DisableQPSLimits {
+		kubeControllerManagerArgs = append(kubeControllerManagerArgs,
+			"--kube-api-qps="+format.String(consts.DefaultUnlimitedQPS),
+			"--kube-api-burst="+format.String(consts.DefaultUnlimitedBurst),
+		)
+	}
+
+	if conf.Verbosity != log.LevelInfo {
+		kubeControllerManagerArgs = append(kubeControllerManagerArgs, "--v="+format.String(log.ToKlogLevel(conf.Verbosity)))
+	}
+
 	return internalversion.Component{
 		Name:    "kube-controller-manager",
 		Version: conf.Version.String(),
@@ -152,6 +202,7 @@ func BuildKubeControllerManagerComponent(conf BuildKubeControllerManagerComponen
 		Command: []string{"kube-controller-manager"},
 		Volumes: volumes,
 		Args:    kubeControllerManagerArgs,
+		Ports:   ports,
 		Binary:  conf.Binary,
 		Image:   conf.Image,
 		WorkDir: conf.Workdir,

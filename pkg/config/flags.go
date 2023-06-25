@@ -18,46 +18,76 @@ package config
 
 import (
 	"context"
-	"errors"
 	"os"
 
 	"github.com/spf13/pflag"
 
 	"sigs.k8s.io/kwok/pkg/consts"
 	"sigs.k8s.io/kwok/pkg/log"
+	"sigs.k8s.io/kwok/pkg/utils/file"
 	"sigs.k8s.io/kwok/pkg/utils/path"
+	"sigs.k8s.io/kwok/pkg/utils/slices"
 )
 
-type configCtx int
-
+// InitFlags initializes the flags for the configuration.
 func InitFlags(ctx context.Context, flags *pflag.FlagSet) (context.Context, error) {
-	defaultConfigPath := path.Join(WorkDir, consts.ConfigName)
+	defaultConfigPath := path.RelFromHome(path.Join(WorkDir, consts.ConfigName))
 	config := flags.StringArrayP("config", "c", []string{defaultConfigPath}, "config path")
 	_ = flags.Parse(os.Args[1:])
 
-	logger := log.FromContext(ctx)
-	objs, err := Load(ctx, *config...)
+	// Expand the all config paths.
+	defaultConfigPath, err := path.Expand(defaultConfigPath)
 	if err != nil {
-		if len(*config) == 1 && (*config)[0] == defaultConfigPath && errors.Is(err, os.ErrNotExist) {
-			logger.Debug("Load config",
-				"path", *config,
-				"err", err,
-			)
-			return ctx, nil
+		return nil, err
+	}
+	configPaths := make([]string, 0, len(*config))
+	for _, c := range *config {
+		configPath, err := path.Expand(c)
+		if err != nil {
+			return nil, err
 		}
+		configPaths = append(configPaths, configPath)
+	}
+
+	configPaths = loadConfig(configPaths, defaultConfigPath, file.Exists(defaultConfigPath))
+
+	logger := log.FromContext(ctx)
+	objs, err := Load(ctx, configPaths...)
+	if err != nil {
 		return nil, err
 	}
 
 	if len(objs) == 0 {
 		logger.Debug("Load config",
-			"path", *config,
+			"path", configPaths,
 			"err", "empty config",
 		)
-		return ctx, nil
+	} else {
+		logger.Debug("Load config",
+			"path", configPaths,
+			"count", len(objs),
+			"content", objs,
+		)
 	}
 
-	logger.Debug("Load config",
-		"path", *config,
-	)
-	return context.WithValue(ctx, configCtx(0), objs), nil
+	return setupContext(ctx, objs), nil
+}
+
+// loadConfig loads the config paths.
+// ~/.kwok/kwok.yaml will be loaded first if it exists.
+func loadConfig(configPaths []string, defaultConfigPath string, existDefaultConfig bool) []string {
+	if !slices.Contains(configPaths, defaultConfigPath) {
+		if existDefaultConfig {
+			// If the defaultConfigPath is not specified and the default config exists, it will be loaded first.
+			return append([]string{defaultConfigPath}, configPaths...)
+		}
+	} else {
+		if !existDefaultConfig {
+			// If the defaultConfigPath is specified and the default config does not exist, it will be removed.
+			return slices.Filter(configPaths, func(s string) bool {
+				return s != defaultConfigPath
+			})
+		}
+	}
+	return configPaths
 }

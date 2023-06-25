@@ -27,7 +27,17 @@ BASE_REF ?= $(shell git rev-parse --abbrev-ref HEAD)
 
 EXTRA_TAGS ?=
 
-SUPPORTED_RELEASES ?= $(shell cat ./supported_releases.txt)
+# The list of supported kube releases
+SUPPORTED_KUBE_RELEASES ?= $(shell cat ./supported_releases.txt)
+
+# The number of supported kube releases
+NUMBER_SUPPORTED_KUBE_RELEASES ?= 1
+
+# Get the first N kube releases
+KUBE_RELEASES ?= $(shell echo $(SUPPORTED_KUBE_RELEASES) | cut -d ' ' -f 1-$(NUMBER_SUPPORTED_KUBE_RELEASES))
+
+# The latest kube release
+LATEST_KUBE_RELEASE ?= $(shell echo $(SUPPORTED_KUBE_RELEASES) | cut -d ' ' -f 1)
 
 BINARY ?= kwok kwokctl
 
@@ -50,6 +60,8 @@ STAGING_IMAGE_PREFIX = $(IMAGE_PREFIX)
 STAGING_PREFIX =
 endif
 
+PRE_RELEASE ?=
+
 ifeq ($(STAGING_IMAGE_PREFIX),)
 KWOK_IMAGE ?= kwok
 CLUSTER_IMAGE ?= cluster
@@ -64,23 +76,29 @@ IMAGE_PLATFORMS ?= linux/amd64 linux/arm64
 
 BINARY_PLATFORMS ?= linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64
 
+BUILDER ?= docker
 DOCKER_CLI_EXPERIMENTAL ?= enabled
 
 .PHONY: default
 default: help
 
 vendor:
-	$(GO_CMD) mod vendor
+	@$(GO_CMD) mod vendor
 
 ## unit-test: Run unit tests
 .PHONY: unit-test
 unit-test: vendor
-	$(GO_CMD) test ./pkg/...
+	@$(GO_CMD) test ./pkg/...
 
 ## verify: Verify code
 .PHONY: verify
 verify:
 	@./hack/verify-all.sh
+
+## update: Update all the generated
+.PHONY: update
+update:
+	@./hack/update-all.sh
 
 ## build: Build binary
 .PHONY: build
@@ -95,8 +113,9 @@ build: vendor
 		--binary-prefix=${BINARY_PREFIX} \
 		--binary-name=${BINARY_NAME} \
 		--version=${VERSION} \
-		--kube-version=v$(shell echo $(SUPPORTED_RELEASES) | tr ' ' '\n' | head -n 1 ) \
+		--kube-version=v${LATEST_KUBE_RELEASE} \
 		--staging-prefix=${STAGING_PREFIX} \
+		--pre-release=${PRE_RELEASE} \
 		--dry-run=${DRY_RUN} \
 		--push=${PUSH}
 
@@ -119,7 +138,7 @@ build-cluster-image:
 ifeq ($(GOOS),linux)
 	@make build image cluster-image
 else ifeq ($(GOOS),darwin)
-	@make BINARY=kwok BINARY_PLATFORMS=linux/$(GOARCH) cross-build && \
+	@make BINARY_PLATFORMS=linux/$(GOARCH) cross-build && \
 		make IMAGE_PLATFORMS=linux/$(GOARCH) cross-image cross-cluster-image
 else
 	@echo "Unsupported OS: $(GOOS)"
@@ -138,8 +157,9 @@ cross-build: vendor
 		--binary-prefix=${BINARY_PREFIX} \
 		--binary-name=${BINARY_NAME} \
 		--version=${VERSION} \
-		--kube-version=v$(shell echo $(SUPPORTED_RELEASES) | tr ' ' '\n' | head -n 1 ) \
+		--kube-version=v${LATEST_KUBE_RELEASE} \
 		--staging-prefix=${STAGING_PREFIX} \
+		--pre-release=${PRE_RELEASE} \
 		--dry-run=${DRY_RUN} \
 		--push=${PUSH}
 
@@ -152,6 +172,7 @@ image:
 		--version=${VERSION} \
 		--staging-prefix=${STAGING_PREFIX} \
 		--dry-run=${DRY_RUN} \
+		--builder=${BUILDER} \
 		--push=${PUSH}
 
 ## cross-image: Build kwok images for all supported platforms
@@ -164,18 +185,20 @@ cross-image:
 		--version=${VERSION} \
 		--staging-prefix=${STAGING_PREFIX} \
 		--dry-run=${DRY_RUN} \
+		--builder=${BUILDER} \
 		--push=${PUSH}
 
 ## cluster-image: Build cluster image
 .PHONY: cluster-image
 cluster-image:
 	@./images/cluster/build.sh \
+		$(addprefix --kube-version=v, $(KUBE_RELEASES)) \
 		$(addprefix --extra-tag=, $(EXTRA_TAGS)) \
-		--kube-version=v$(shell echo $(SUPPORTED_RELEASES) | tr ' ' '\n' | head -n 1 ) \
 		--image=${CLUSTER_IMAGE} \
 		--version=${VERSION} \
 		--staging-prefix=${STAGING_PREFIX} \
 		--dry-run=${DRY_RUN} \
+		--builder=${BUILDER} \
 		--push=${PUSH}
 
 ## cross-cluster-image: Build cluster images for all supported platforms and all supported Kubernetes versions.
@@ -183,12 +206,13 @@ cluster-image:
 cross-cluster-image:
 	@./images/cluster/build.sh \
 		$(addprefix --platform=, $(IMAGE_PLATFORMS)) \
-		$(addprefix --kube-version=v, $(shell echo $(SUPPORTED_RELEASES) | tr ' ' '\n' | head -n 6 )) \
+		$(addprefix --kube-version=v, $(KUBE_RELEASES)) \
 		$(addprefix --extra-tag=, $(EXTRA_TAGS)) \
 		--image=${CLUSTER_IMAGE} \
 		--version=${VERSION} \
 		--staging-prefix=${STAGING_PREFIX} \
 		--dry-run=${DRY_RUN} \
+		--builder=${BUILDER} \
 		--push=${PUSH}
 
 ## integration-tests: Run integration tests
@@ -200,7 +224,11 @@ integration-test:
 .PHONY: e2e-test
 e2e-test:
 	@./hack/requirements.sh kubectl buildx kind
-	@./hack/e2e-test.sh --skip=nerdctl --skip=kind
+	@./hack/e2e-test.sh \
+		--skip=nerdctl \
+		--skip=podman \
+		--skip=kind \
+		--skip=kwokctl_binary_port_forward
 
 ## help: Show this help message
 .PHONY: help

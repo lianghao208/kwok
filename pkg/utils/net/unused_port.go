@@ -28,20 +28,26 @@ var (
 )
 
 // GetUnusedPort returns an unused port on the local machine.
-func GetUnusedPort(ctx context.Context) (port uint32, err error) {
-	var listener net.Listener
+func GetUnusedPort(ctx context.Context) (uint32, error) {
 	for lastUsedPort > 10000 && ctx.Err() == nil {
 		lastUsedPort--
-		listener, err = net.Listen("tcp", fmt.Sprintf(":%d", lastUsedPort))
-		if err == nil {
-			break
+		if isPortUnused(lastUsedPort) {
+			return lastUsedPort, nil
 		}
 	}
 
-	if listener == nil {
-		return 0, fmt.Errorf("%w: %v", errGetUnusedPort, err)
-	}
+	return 0, errGetUnusedPort
+}
 
+func isPortUnused(port uint32) bool {
+	return isHostPortUnused(LocalAddress, port) && isHostPortUnused("", port)
+}
+
+func isHostPortUnused(host string, port uint32) bool {
+	listener, err := net.Listen("tcp", fmt.Sprintf("%v:%d", host, port))
+	if err != nil {
+		return false
+	}
 	_ = listener.Close()
-	return lastUsedPort, nil
+	return true
 }

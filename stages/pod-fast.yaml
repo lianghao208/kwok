@@ -1,7 +1,7 @@
 kind: Stage
 apiVersion: kwok.x-k8s.io/v1alpha1
 metadata:
-  name: pod-create-and-ready
+  name: pod-ready
 spec:
   resourceRef:
     apiGroup: v1
@@ -15,6 +15,7 @@ spec:
   next:
     statusTemplate: |
       {{ $now := Now }}
+
       conditions:
         - lastTransitionTime: {{ $now }}
           status: "True"
@@ -56,18 +57,15 @@ spec:
               startedAt: {{ $now }}
         {{ end }}
 
-      {{ with .status }}
-      hostIP: {{ with .hostIP }} {{ . }} {{ else }} {{ NodeIP }} {{ end }}
-      podIP: {{ with .podIP }} {{ . }} {{ else }} {{ PodIP }} {{ end }}
-      {{ end }}
-
+      hostIP: {{ NodeIPWith .spec.nodeName }}
+      podIP: {{ PodIPWith .spec.nodeName ( or .spec.hostNetwork false ) ( or .metadata.uid "" ) ( or .metadata.name "" ) ( or .metadata.namespace "" ) }}
       phase: Running
       startTime: {{ $now }}
 ---
 kind: Stage
 apiVersion: kwok.x-k8s.io/v1alpha1
 metadata:
-  name: pod-completed-for-job
+  name: pod-complete
 spec:
   resourceRef:
     apiGroup: v1

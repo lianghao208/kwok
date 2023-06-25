@@ -14,10 +14,13 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Package cluster implements the start cluster command
 package cluster
 
 import (
 	"context"
+	"errors"
+	"os"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -41,7 +44,6 @@ func NewCommand(ctx context.Context) *cobra.Command {
 		Args:  cobra.NoArgs,
 		Use:   "cluster",
 		Short: "Start a cluster",
-		Long:  "Start a cluster",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			flags.Name = config.DefaultCluster
 			return runE(cmd.Context(), flags)
@@ -62,6 +64,7 @@ func runE(ctx context.Context, flags *flagpole) error {
 	logger = logger.With("cluster", flags.Name)
 	ctx = log.NewContext(ctx, logger)
 
+	gctx := ctx
 	if flags.Timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, flags.Timeout)
@@ -70,19 +73,31 @@ func runE(ctx context.Context, flags *flagpole) error {
 
 	rt, err := runtime.DefaultRegistry.Load(ctx, name, workdir)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			logger.Warn("Cluster is not exists")
+		}
 		return err
 	}
 
-	logger.Info("Starting cluster")
+	if ready, err := rt.Ready(ctx); err == nil && ready {
+		logger.Info("Cluster is already ready")
+		return nil
+	}
+
+	start := time.Now()
+	logger.Info("Cluster is starting")
 	err = rt.Start(ctx)
 	if err != nil {
 		return err
 	}
+	logger.Info("Cluster is started",
+		"elapsed", time.Since(start),
+	)
 
 	if flags.Wait > 0 {
 		start := time.Now()
 		logger.Info("Waiting for cluster to be ready")
-		err = rt.WaitReady(context.Background(), flags.Wait)
+		err = rt.WaitReady(gctx, flags.Wait)
 		if err != nil {
 			logger.Error("Failed to wait for cluster to be ready", err,
 				"elapsed", time.Since(start),
@@ -94,6 +109,5 @@ func runE(ctx context.Context, flags *flagpole) error {
 		}
 	}
 
-	logger.Info("Cluster started")
 	return nil
 }
