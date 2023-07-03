@@ -93,7 +93,7 @@ type Runtime interface {
 	LogsFollow(ctx context.Context, name string, out io.Writer) error
 
 	// CollectLogs will populate dir with cluster logs and other debug files
-	CollectLogs(ctx context.Context, name string, dir string) error
+	CollectLogs(ctx context.Context, dir string) error
 
 	// AuditLogs audit logs of apiserver
 	AuditLogs(ctx context.Context, out io.Writer) error
@@ -121,4 +121,10 @@ type Runtime interface {
 
 	// GetWorkdirPath get the workdir path of cluster
 	GetWorkdirPath(name string) string
+
+	// InitCRDs init the crds of cluster
+	InitCRDs(ctx context.Context) error
+
+	// IsDryRun returns true if the runtime is in dry-run mode
+	IsDryRun() bool
 }

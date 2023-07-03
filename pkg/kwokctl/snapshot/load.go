@@ -44,17 +44,8 @@ func Load(ctx context.Context, kubeconfigPath string, r io.Reader, filters []str
 		return err
 	}
 	l.addResource(ctx, filters)
-	start := time.Now()
-	err = l.Load(ctx, r)
-	if err != nil {
-		return err
-	}
 
-	logger := log.FromContext(ctx)
-	logger.Info("Load Snapshot",
-		"elapsed", time.Since(start),
-	)
-	return nil
+	return l.Load(ctx, r)
 }
 
 type uniqueKey struct {
@@ -73,8 +64,8 @@ type loader struct {
 	exist   map[uniqueKey]types.UID
 	pending map[uniqueKey][]*unstructured.Unstructured
 
-	restMapper meta.RESTMapper
-	dynClient  *dynamic.DynamicClient
+	restMapper    meta.RESTMapper
+	dynamicClient dynamic.Interface
 }
 
 func newLoader(kubeconfigPath string) (*loader, error) {
@@ -93,11 +84,11 @@ func newLoader(kubeconfigPath string) (*loader, error) {
 	}
 
 	return &loader{
-		filterMap:  make(map[schema.GroupKind]struct{}),
-		exist:      make(map[uniqueKey]types.UID),
-		pending:    make(map[uniqueKey][]*unstructured.Unstructured),
-		restMapper: restMapper,
-		dynClient:  dynClient,
+		filterMap:     make(map[schema.GroupKind]struct{}),
+		exist:         make(map[uniqueKey]types.UID),
+		pending:       make(map[uniqueKey][]*unstructured.Unstructured),
+		restMapper:    restMapper,
+		dynamicClient: dynClient,
 	}, nil
 }
 
@@ -116,6 +107,8 @@ func (l *loader) addResource(ctx context.Context, resources []string) {
 func (l *loader) Load(ctx context.Context, r io.Reader) error {
 	logger := log.FromContext(ctx)
 
+	start := time.Now()
+	totalCount := 0
 	decoder := yaml.NewDecoder(r)
 
 	err := decoder.Decode(func(obj *unstructured.Unstructured) error {
@@ -131,6 +124,7 @@ func (l *loader) Load(ctx context.Context, r io.Reader) error {
 			return nil
 		}
 
+		totalCount++
 		l.load(ctx, obj)
 		return nil
 	})
@@ -171,6 +165,11 @@ func (l *loader) Load(ctx context.Context, r io.Reader) error {
 			"name", log.KObj(pendingObj),
 		)
 	}
+
+	logger.Info("Load resources",
+		"count", totalCount,
+		"elapsed", time.Since(start),
+	)
 	return nil
 }
 
@@ -247,7 +246,7 @@ func (l *loader) apply(ctx context.Context, obj *unstructured.Unstructured) *uns
 
 	clearUnstructured(obj)
 
-	nri := l.dynClient.Resource(gvr)
+	nri := l.dynamicClient.Resource(gvr)
 	var ri dynamic.ResourceInterface = nri
 
 	if ns := obj.GetNamespace(); ns != "" {

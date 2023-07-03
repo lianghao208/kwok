@@ -121,6 +121,10 @@ func runE(ctx context.Context, flags *flagpole) error {
 	if err != nil {
 		return err
 	}
+	typedKwokClient, err := clientset.ToTypedKwokClient()
+	if err != nil {
+		return err
+	}
 
 	if flags.Options.ManageAllNodes {
 		if flags.Options.ManageNodesWithAnnotationSelector != "" || flags.Options.ManageNodesWithLabelSelector != "" {
@@ -174,7 +178,7 @@ func runE(ctx context.Context, flags *flagpole) error {
 
 	ctr, err := controllers.NewController(controllers.Config{
 		Clock:                                 clock.RealClock{},
-		ClientSet:                             typedClient,
+		TypedClient:                           typedClient,
 		EnableCNI:                             flags.Options.EnableCNI,
 		ManageAllNodes:                        flags.Options.ManageAllNodes,
 		ManageNodesWithAnnotationSelector:     flags.Options.ManageNodesWithAnnotationSelector,
@@ -212,6 +216,8 @@ func runE(ctx context.Context, flags *flagpole) error {
 		clusterAttaches := config.FilterWithTypeFromContext[*internalversion.ClusterAttach](ctx)
 		attaches := config.FilterWithTypeFromContext[*internalversion.Attach](ctx)
 		config := server.Config{
+			TypedKwokClient:     typedKwokClient,
+			EnableCRDs:          flags.Options.EnableCRDs,
 			ClusterPortForwards: clusterPortForwards,
 			PortForwards:        portForwards,
 			ClusterExecs:        clusterExecs,
@@ -223,8 +229,13 @@ func runE(ctx context.Context, flags *flagpole) error {
 			Metrics:             metrics,
 			Controller:          ctr,
 		}
-		svc := server.NewServer(config)
-		if err := svc.InstallMetrics(); err != nil {
+		svc, err := server.NewServer(config)
+		if err != nil {
+			return fmt.Errorf("failed to create server: %w", err)
+		}
+
+		err = svc.InstallMetrics()
+		if err != nil {
 			return fmt.Errorf("failed to install metrics: %w", err)
 		}
 		svc.InstallHealthz()

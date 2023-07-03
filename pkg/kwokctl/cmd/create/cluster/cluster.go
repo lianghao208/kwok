@@ -261,6 +261,10 @@ func runE(ctx context.Context, flags *flagpole) error {
 	if err != nil {
 		return fmt.Errorf("failed to start cluster %q: %w", name, err)
 	}
+	err = rt.InitCRDs(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to init crds %q: %w", name, err)
+	}
 	logger.Info("Cluster is started",
 		"elapsed", time.Since(start),
 	)
@@ -281,7 +285,7 @@ func runE(ctx context.Context, flags *flagpole) error {
 		}
 	}
 
-	if log.IsTerminal() && flags.Kubeconfig != "" {
+	if log.IsTerminal() && flags.Kubeconfig != "" && !rt.IsDryRun() {
 		_, _ = fmt.Fprintf(os.Stderr, `You can now use your cluster with:
 
 	kubectl cluster-info --context %s
