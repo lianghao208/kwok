@@ -23,6 +23,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"sigs.k8s.io/kwok/pkg/config"
+	conf "sigs.k8s.io/kwok/pkg/kwokctl/cmd/config"
 	"sigs.k8s.io/kwok/pkg/kwokctl/cmd/create"
 	del "sigs.k8s.io/kwok/pkg/kwokctl/cmd/delete"
 	"sigs.k8s.io/kwok/pkg/kwokctl/cmd/etcdctl"
@@ -30,6 +31,7 @@ import (
 	"sigs.k8s.io/kwok/pkg/kwokctl/cmd/get"
 	"sigs.k8s.io/kwok/pkg/kwokctl/cmd/kubectl"
 	"sigs.k8s.io/kwok/pkg/kwokctl/cmd/logs"
+	"sigs.k8s.io/kwok/pkg/kwokctl/cmd/scale"
 	"sigs.k8s.io/kwok/pkg/kwokctl/cmd/snapshot"
 	"sigs.k8s.io/kwok/pkg/kwokctl/cmd/start"
 	"sigs.k8s.io/kwok/pkg/kwokctl/cmd/stop"
@@ -56,6 +58,7 @@ func NewCommand(ctx context.Context) *cobra.Command {
 	cmd.TraverseChildren = true
 
 	cmd.AddCommand(
+		conf.NewCommand(ctx),
 		create.NewCommand(ctx),
 		del.NewCommand(ctx),
 		get.NewCommand(ctx),
@@ -64,6 +67,7 @@ func NewCommand(ctx context.Context) *cobra.Command {
 		kubectl.NewCommand(ctx),
 		etcdctl.NewCommand(ctx),
 		logs.NewCommand(ctx),
+		scale.NewCommand(ctx),
 		snapshot.NewCommand(ctx),
 		export.NewCommand(ctx),
 	)

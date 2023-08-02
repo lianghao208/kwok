@@ -19,7 +19,6 @@ DIR="$(realpath "${DIR}")"
 
 ROOT_DIR="$(realpath "${DIR}/../..")"
 
-source "${ROOT_DIR}/hack/requirements.sh"
 source "${DIR}/suite.sh"
 
 VERSION="test"
@@ -38,7 +37,8 @@ if [[ "${GOOS}" == "windows" ]]; then
 fi
 
 export KWOK_CONTROLLER_IMAGE="localhost/kwok:${VERSION}"
-export PATH="${LOCAL_PATH}:${PATH}"
+export PATH="${LOCAL_PATH}:${ROOT_DIR}/bin:${PATH}"
+export KWOK_WORKDIR="${ROOT_DIR}/workdir"
 
 function test_all() {
   local runtime="${1}"
@@ -66,6 +66,18 @@ function supported_releases() {
   head <"${ROOT_DIR}/supported_releases.txt" -n "${LAST_RELEASE_SIZE}"
 }
 
+function build_kwokctl_config() {
+  "${ROOT_DIR}/hack/manifests.sh" --kustomize=kwokctl
+  if [[ -f "${ROOT_DIR}/workdir/kwok.yaml" ]]; then
+    if [[ "$(cat "${ROOT_DIR}/workdir/kwok.yaml")" == *"$(cat "${ROOT_DIR}/artifacts/kwokctl.yaml")"* ]]; then
+      cat "${ROOT_DIR}/artifacts/kwokctl.yaml" >>"${ROOT_DIR}/workdir/kwok.yaml"
+    fi
+  else
+    mkdir -p "${ROOT_DIR}/workdir"
+    cat "${ROOT_DIR}/artifacts/kwokctl.yaml" >"${ROOT_DIR}/workdir/kwok.yaml"
+  fi
+}
+
 function build_kwokctl() {
   if [[ -f "${KWOKCTL_CONTROLLER_BINARY}" ]]; then
     return
@@ -90,26 +102,29 @@ function build_image() {
 }
 
 function requirements() {
-  install_kubectl
-  install_buildx
+  "${ROOT_DIR}/hack/requirements.sh" kubectl buildx
   build_kwokctl
   build_image
+  build_kwokctl_config
 }
 
 function requirements_for_podman() {
-  install_kubectl
+  "${ROOT_DIR}/hack/requirements.sh" kubectl
   build_kwokctl
   build_image podman
+  build_kwokctl_config
 }
 
 function requirements_for_nerdctl() {
-  install_kubectl
+  "${ROOT_DIR}/hack/requirements.sh" kubectl
   build_kwokctl
   build_image nerdctl
+  build_kwokctl_config
 }
 
 function requirements_for_binary() {
-  install_kubectl
+  "${ROOT_DIR}/hack/requirements.sh" kubectl
   build_kwokctl
   build_kwok
+  build_kwokctl_config
 }

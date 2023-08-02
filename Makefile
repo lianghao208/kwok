@@ -76,6 +76,8 @@ IMAGE_PLATFORMS ?= linux/amd64 linux/arm64
 
 BINARY_PLATFORMS ?= linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64
 
+MANIFESTS ?= kwok kwokctl stage/fast
+
 BUILDER ?= docker
 DOCKER_CLI_EXPERIMENTAL ?= enabled
 
@@ -219,7 +221,7 @@ cross-cluster-image:
 .PHONY: manifests
 manifests:
 	@./hack/manifests.sh \
-        --kustomize=kwok \
+        $(addprefix --kustomize=, $(MANIFESTS)) \
 		--bucket=${BUCKET} \
 		--gh-release=${GH_RELEASE} \
 		--image-prefix=${IMAGE_PREFIX} \
@@ -237,11 +239,18 @@ integration-test:
 .PHONY: e2e-test
 e2e-test:
 	@./hack/requirements.sh kubectl buildx kind
-	@./hack/e2e-test.sh \
+	@PATH=$(PWD)/bin:${PATH} ./hack/e2e-test.sh \
 		--skip=nerdctl \
 		--skip=podman \
 		--skip=kind \
 		--skip=kwokctl_binary_port_forward
+
+## release: Release kwok
+.PHONY: release
+release:
+	@./hack/requirements.sh gsutil buildx kustomize
+	@PATH=$(PWD)/bin:${PATH} make manifests cross-build cross-image cross-cluster-image
+
 
 ## help: Show this help message
 .PHONY: help

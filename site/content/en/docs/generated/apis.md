@@ -26,6 +26,9 @@ Resource Types:
 </li>
 <li>
 <a href="#config.kwok.x-k8s.io/v1alpha1.KwokctlConfiguration">KwokctlConfiguration</a>
+</li>
+<li>
+<a href="#config.kwok.x-k8s.io/v1alpha1.KwokctlResource">KwokctlResource</a>
 </li></ul>
 <h3 id="config.kwok.x-k8s.io/v1alpha1.KwokConfiguration">
 KwokConfiguration
@@ -190,6 +193,79 @@ KwokctlConfigurationStatus
 </td>
 <td>
 <p>Status holds information about the status.</p>
+</td>
+</tr>
+</tbody>
+</table>
+<h3 id="config.kwok.x-k8s.io/v1alpha1.KwokctlResource">
+KwokctlResource
+<a href="#config.kwok.x-k8s.io%2fv1alpha1.KwokctlResource"> #</a>
+</h3>
+<p>
+<p>KwokctlResource provides resource definition for kwokctl.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>apiVersion</code>
+string
+</td>
+<td>
+<code>
+config.kwok.x-k8s.io/v1alpha1
+</code>
+</td>
+</tr>
+<tr>
+<td>
+<code>kind</code>
+string
+</td>
+<td><code>KwokctlResource</code></td>
+</tr>
+<tr>
+<td>
+<code>metadata</code>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.27/#objectmeta-v1-meta">
+Kubernetes meta/v1.ObjectMeta
+</a>
+</em>
+</td>
+<td>
+<p>Standard list metadata.
+More info: <a href="https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata">https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata</a></p>
+Refer to the Kubernetes API documentation for the fields of the
+<code>metadata</code> field.
+</td>
+</tr>
+<tr>
+<td>
+<code>parameters</code>
+<em>
+encoding/json.RawMessage
+</em>
+</td>
+<td>
+<p>Parameters is the parameters for the kwokctl resource configuration.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>template</code>
+<em>
+string
+</em>
+</td>
+<td>
+<p>Template is the template for the kwokctl resource configuration.</p>
 </td>
 </tr>
 </tbody>
@@ -1360,6 +1436,18 @@ string
 <td>
 <em>(Optional)</em>
 <p>Command is Entrypoint array. Not executed within a shell. Only works with Image.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>user</code>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>User is the user for the component.</p>
 </td>
 </tr>
 <tr>
@@ -3522,6 +3610,43 @@ ConditionStatus
 </tr>
 </tbody>
 </table>
+<h3 id="kwok.x-k8s.io/v1alpha1.Dimension">
+Dimension
+(<code>string</code> alias)
+<a href="#kwok.x-k8s.io%2fv1alpha1.Dimension"> #</a>
+</h3>
+<p>
+<em>Appears on: </em>
+<a href="#kwok.x-k8s.io/v1alpha1.MetricConfig">MetricConfig</a>
+</p>
+<p>
+<p>Dimension is a dimension of the metric.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Value</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>&#34;container&#34;</code></td>
+<td><p>DimensionContainer is a container dimension.</p>
+</td>
+</tr>
+<tr>
+<td><code>&#34;node&#34;</code></td>
+<td><p>DimensionNode is a node dimension.</p>
+</td>
+</tr>
+<tr>
+<td><code>&#34;pod&#34;</code></td>
+<td><p>DimensionPod is a pod dimension.</p>
+</td>
+</tr>
+</tbody>
+</table>
 <h3 id="kwok.x-k8s.io/v1alpha1.EnvVar">
 EnvVar
 <a href="#kwok.x-k8s.io%2fv1alpha1.EnvVar"> #</a>
@@ -3724,6 +3849,19 @@ string
 <p>Envs is a list of environment variables to exec with.</p>
 </td>
 </tr>
+<tr>
+<td>
+<code>securityContext</code>
+<em>
+<a href="#kwok.x-k8s.io/v1alpha1.SecurityContext">
+SecurityContext
+</a>
+</em>
+</td>
+<td>
+<p>SecurityContext is the user context to exec.</p>
+</td>
+</tr>
 </tbody>
 </table>
 <h3 id="kwok.x-k8s.io/v1alpha1.ExpressionFromSource">
@@ -3889,6 +4027,43 @@ string
 </td>
 <td>
 <p>Address is the address to forward to.</p>
+</td>
+</tr>
+</tbody>
+</table>
+<h3 id="kwok.x-k8s.io/v1alpha1.Kind">
+Kind
+(<code>string</code> alias)
+<a href="#kwok.x-k8s.io%2fv1alpha1.Kind"> #</a>
+</h3>
+<p>
+<em>Appears on: </em>
+<a href="#kwok.x-k8s.io/v1alpha1.MetricConfig">MetricConfig</a>
+</p>
+<p>
+<p>Kind is kind of metric configuration.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Value</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>&#34;counter&#34;</code></td>
+<td><p>KindCounter is a counter metric.</p>
+</td>
+</tr>
+<tr>
+<td><code>&#34;gauge&#34;</code></td>
+<td><p>KindGauge is a gauge metric.</p>
+</td>
+</tr>
+<tr>
+<td><code>&#34;histogram&#34;</code></td>
+<td><p>KindHistogram is a histogram metric.</p>
 </td>
 </tr>
 </tbody>
@@ -4117,7 +4292,9 @@ string
 <td>
 <code>kind</code>
 <em>
-string
+<a href="#kwok.x-k8s.io/v1alpha1.Kind">
+Kind
+</a>
 </em>
 </td>
 <td>
@@ -4159,6 +4336,19 @@ string
 </td>
 <td>
 <p>Buckets is a list of buckets for a histogram metric.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>dimension</code>
+<em>
+<a href="#kwok.x-k8s.io/v1alpha1.Dimension">
+Dimension
+</a>
+</em>
+</td>
+<td>
+<p>Dimension is a dimension of the metric.</p>
 </td>
 </tr>
 </tbody>
@@ -4400,6 +4590,49 @@ PortForwardStatus
 </td>
 <td>
 <p>Conditions holds conditions for port forward</p>
+</td>
+</tr>
+</tbody>
+</table>
+<h3 id="kwok.x-k8s.io/v1alpha1.SecurityContext">
+SecurityContext
+<a href="#kwok.x-k8s.io%2fv1alpha1.SecurityContext"> #</a>
+</h3>
+<p>
+<em>Appears on: </em>
+<a href="#kwok.x-k8s.io/v1alpha1.ExecTargetLocal">ExecTargetLocal</a>
+</p>
+<p>
+<p>SecurityContext specifies the existing uid and gid to run exec command in container process.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>runAsUser</code>
+<em>
+int64
+</em>
+</td>
+<td>
+<p>RunAsUser is the existing uid to run exec command in container process.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>runAsGroup</code>
+<em>
+int64
+</em>
+</td>
+<td>
+<p>RunAsGroup is the existing gid to run exec command in container process.</p>
 </td>
 </tr>
 </tbody>

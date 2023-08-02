@@ -85,7 +85,7 @@ func NewCommand(ctx context.Context) *cobra.Command {
 	cmd.Flags().StringVar(&flags.Master, "master", flags.Master, "The address of the Kubernetes API server (overrides any value in kubeconfig).")
 	cmd.Flags().StringVar(&flags.Options.ServerAddress, "server-address", flags.Options.ServerAddress, "Address to expose the server on")
 	cmd.Flags().UintVar(&flags.Options.NodeLeaseDurationSeconds, "node-lease-duration-seconds", flags.Options.NodeLeaseDurationSeconds, "Duration of node lease seconds")
-	cmd.Flags().StringArrayVar(&flags.Options.EnableCRDs, "enable-crd", flags.Options.EnableCRDs, "List of CRDs to enable")
+	cmd.Flags().StringSliceVar(&flags.Options.EnableCRDs, "enable-crd", flags.Options.EnableCRDs, "List of CRDs to enable")
 
 	cmd.Flags().BoolVar(&flags.Options.EnableCNI, "experimental-enable-cni", flags.Options.EnableCNI, "Experimental support for getting pod ip from CNI, for CNI-related components, Only works with Linux")
 	if config.GOOS != "linux" {
@@ -263,6 +263,7 @@ func runE(ctx context.Context, flags *flagpole) error {
 		TypedClient:                           typedClient,
 		TypedKwokClient:                       typedKwokClient,
 		EnableCNI:                             flags.Options.EnableCNI,
+		EnableMetrics:                         len(metrics) != 0 || slices.Contains(flags.Options.EnableCRDs, v1alpha1.MetricKind),
 		ManageAllNodes:                        flags.Options.ManageAllNodes,
 		ManageNodesWithAnnotationSelector:     flags.Options.ManageNodesWithAnnotationSelector,
 		ManageNodesWithLabelSelector:          flags.Options.ManageNodesWithLabelSelector,
@@ -308,12 +309,9 @@ func runE(ctx context.Context, flags *flagpole) error {
 		if err != nil {
 			return fmt.Errorf("failed to create server: %w", err)
 		}
-
-		err = svc.InstallMetrics()
-		if err != nil {
-			return fmt.Errorf("failed to install metrics: %w", err)
-		}
 		svc.InstallHealthz()
+
+		svc.InstallServiceDiscovery()
 
 		if flags.Options.EnableDebuggingHandlers {
 			svc.InstallDebuggingHandlers()
@@ -321,6 +319,17 @@ func runE(ctx context.Context, flags *flagpole) error {
 		} else {
 			svc.InstallDebuggingDisabledHandlers()
 		}
+
+		err = svc.InstallCRD(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to install crd: %w", err)
+		}
+
+		err = svc.InstallMetrics(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to install metrics: %w", err)
+		}
+
 		go func() {
 			err := svc.Run(ctx, serverAddress, flags.Options.TLSCertFile, flags.Options.TLSPrivateKeyFile)
 			if err != nil {

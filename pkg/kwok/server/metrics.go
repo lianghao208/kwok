@@ -17,21 +17,32 @@ limitations under the License.
 package server
 
 import (
+	"context"
 	"fmt"
+	"strings"
 
+	"github.com/emicklei/go-restful/v3"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"sigs.k8s.io/kwok/pkg/apis/internalversion"
+	"sigs.k8s.io/kwok/pkg/config/resources"
 	"sigs.k8s.io/kwok/pkg/kwok/metrics"
 	"sigs.k8s.io/kwok/pkg/kwok/metrics/cel"
+	"sigs.k8s.io/kwok/pkg/log"
 )
 
 // InstallMetrics registers the metrics handler on the given mux.
-func (s *Server) InstallMetrics() error {
+func (s *Server) InstallMetrics(ctx context.Context) error {
 	promHandler := promhttp.Handler()
-	s.restfulCont.Handle("/metrics", promHandler)
+
+	selfMetric := func(req *restful.Request, resp *restful.Response) {
+		promHandler.ServeHTTP(resp.ResponseWriter, req.Request)
+	}
 
 	controller := s.controller
 	env, err := cel.NewEnvironment(cel.NodeEvaluatorConfig{
+		EnableEvaluatorCache: true,
+		EnableResultCache:    true,
 		StartedContainersTotal: func(nodeName string) int64 {
 			nodeInfo, ok := controller.GetNode(nodeName)
 			if !ok {
@@ -43,17 +54,74 @@ func (s *Server) InstallMetrics() error {
 	if err != nil {
 		return fmt.Errorf("failed to create CEL environment: %w", err)
 	}
-	for _, m := range s.metrics {
-		handler, err := metrics.NewMetricsUpdateHandler(metrics.UpdateHandlerConfig{
-			NodeName:    m.Name,
-			Metrics:     m,
-			Controller:  controller,
-			Environment: env,
-		})
-		if err != nil {
-			return fmt.Errorf("failed to create metrics update handler: %w", err)
+
+	const rootPath = "/metrics"
+	ws := new(restful.WebService)
+	ws.Path(rootPath)
+	ws.Route(ws.GET("/").To(selfMetric))
+
+	for _, m := range s.metrics.Get() {
+		if !strings.HasPrefix(m.Spec.Path, rootPath) {
+			return fmt.Errorf("metric path %q does not start with %q", m.Spec.Path, rootPath)
 		}
-		s.restfulCont.Handle(m.Spec.Path, handler)
+
+		ws.Route(ws.GET(strings.TrimPrefix(m.Spec.Path, rootPath)).
+			To(s.getMetrics(m, env)))
 	}
+
+	s.restfulCont.Add(ws)
+	s.metricsWebService = ws
+
+	logger := log.FromContext(ctx)
+	syncd, ok := s.metrics.(resources.Synced)
+	if ok {
+		logger.Info("Starting metrics syncer")
+		go func() {
+			for range syncd.Sync() {
+				logger.Info("Metrics synced, updating metrics web service")
+				ws := new(restful.WebService)
+				ws.Path(rootPath)
+				ws.Route(ws.GET("/").To(selfMetric))
+
+				for _, m := range s.metrics.Get() {
+					if !strings.HasPrefix(m.Spec.Path, rootPath) {
+						logger.Warn("metric path does not start with "+rootPath, "path", m.Spec.Path)
+						continue
+					}
+					ws.Route(ws.GET(strings.TrimPrefix(m.Spec.Path, rootPath)).
+						To(s.getMetrics(m, env)))
+				}
+
+				err := s.restfulCont.Remove(s.metricsWebService)
+				if err != nil {
+					logger.Error("failed to remove metrics web service", err)
+				}
+				s.restfulCont.Add(ws)
+				s.metricsWebService = ws
+			}
+		}()
+	}
+
 	return nil
+}
+
+func (s *Server) getMetrics(metric *internalversion.Metric, env *cel.Environment) func(req *restful.Request, resp *restful.Response) {
+	return func(req *restful.Request, resp *restful.Response) {
+		nodeName := req.PathParameter("nodeName")
+		if nodeName == "" {
+			nodeName = metric.Name
+		}
+
+		handler, ok := s.metricsUpdateHandler.Load(nodeName)
+		if !ok {
+			handler = metrics.NewMetricsUpdateHandler(metrics.UpdateHandlerConfig{
+				Controller:  s.controller,
+				Environment: env,
+			})
+			s.metricsUpdateHandler.Store(nodeName, handler)
+		}
+
+		handler.Update(req.Request.Context(), nodeName, metric.Spec.Metrics)
+		handler.ServeHTTP(resp.ResponseWriter, req.Request)
+	}
 }
