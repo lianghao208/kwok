@@ -17,6 +17,7 @@ limitations under the License.
 package config
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -27,19 +28,24 @@ import (
 	"sort"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
-	"sigs.k8s.io/yaml"
+	"sigs.k8s.io/kustomize/api/krusty"
+	"sigs.k8s.io/kustomize/kyaml/filesys"
 
 	configv1alpha1 "sigs.k8s.io/kwok/pkg/apis/config/v1alpha1"
 	"sigs.k8s.io/kwok/pkg/apis/internalversion"
 	"sigs.k8s.io/kwok/pkg/apis/v1alpha1"
-	"sigs.k8s.io/kwok/pkg/config/compatibility"
 	"sigs.k8s.io/kwok/pkg/log"
 	"sigs.k8s.io/kwok/pkg/utils/file"
 	"sigs.k8s.io/kwok/pkg/utils/maps"
 	"sigs.k8s.io/kwok/pkg/utils/patch"
 	"sigs.k8s.io/kwok/pkg/utils/path"
+	"sigs.k8s.io/kwok/pkg/utils/yaml"
+)
+
+var (
+	errUnsupportedType = errors.New("unsupported type")
 )
 
 func loadRawMessages(src []string) ([]json.RawMessage, error) {
@@ -58,7 +64,7 @@ func loadRawMessages(src []string) ([]json.RawMessage, error) {
 		if err != nil {
 			return nil, err
 		}
-		r, err := loadRawFromFile(p)
+		r, err := loadRawMessage(p)
 		if err != nil {
 			return nil, err
 		}
@@ -157,6 +163,18 @@ var configHandlers = map[string]configHandler{
 		Marshal:          marshalConfig,
 		MutateToInternal: mutateToInternalConfig(internalversion.ConvertToInternalClusterAttach),
 		MutateToVersiond: mutateToVersiondConfig(internalversion.ConvertToV1Alpha1ClusterAttach),
+	},
+	v1alpha1.ResourceUsageKind: {
+		Unmarshal:        unmarshalConfig[*v1alpha1.ResourceUsage],
+		Marshal:          marshalConfig,
+		MutateToInternal: mutateToInternalConfig(internalversion.ConvertToInternalResourceUsage),
+		MutateToVersiond: mutateToVersiondConfig(internalversion.ConvertToV1Alpha1ResourceUsage),
+	},
+	v1alpha1.ClusterResourceUsageKind: {
+		Unmarshal:        unmarshalConfig[*v1alpha1.ClusterResourceUsage],
+		Marshal:          marshalConfig,
+		MutateToInternal: mutateToInternalConfig(internalversion.ConvertToInternalClusterResourceUsage),
+		MutateToVersiond: mutateToVersiondConfig(internalversion.ConvertToV1Alpha1ClusterResourceUsage),
 	},
 	v1alpha1.MetricKind: {
 		Unmarshal:        unmarshalConfig[*v1alpha1.Metric],
@@ -274,26 +292,6 @@ func Load(ctx context.Context, src ...string) ([]InternalObject, error) {
 
 		gvk := meta.GroupVersionKind()
 
-		// Converting old configurations to the latest
-		// TODO: Remove this in the future
-		if gvk.Version == "" && gvk.Group == "" && gvk.Kind == "" {
-			conf := compatibility.Config{}
-			err = json.Unmarshal(raw, &conf)
-			if err != nil {
-				logger.Error("Unsupported config", err,
-					"src", src,
-				)
-				continue
-			}
-			obj, ok := compatibility.Convert_Config_To_internalversion_KwokctlConfiguration(&conf)
-			if ok {
-				logger.Debug("Convert old config",
-					"src", src,
-				)
-				return []InternalObject{obj}, nil
-			}
-		}
-
 		handler, ok := configHandlers[gvk.Kind]
 		if !ok {
 			logger.Warn("Unsupported type",
@@ -334,6 +332,27 @@ func Load(ctx context.Context, src ...string) ([]InternalObject, error) {
 	return objs, nil
 }
 
+// LoadUnstructured loads the given path into the context.
+func LoadUnstructured(src ...string) ([]InternalObject, error) {
+	raws, err := loadRawMessages(src)
+	if err != nil {
+		return nil, err
+	}
+
+	objs := []InternalObject{}
+	for _, raw := range raws {
+		obj := unstructured.Unstructured{}
+		err := json.Unmarshal(raw, &obj)
+		if err != nil {
+			return nil, err
+		}
+
+		objs = append(objs, &obj)
+	}
+
+	return objs, nil
+}
+
 // Save saves the given objects to the given path.
 func Save(ctx context.Context, dist string, objs []InternalObject) error {
 	dist = path.Clean(dist)
@@ -366,34 +385,14 @@ func SaveTo(ctx context.Context, w io.Writer, objs []InternalObject) error {
 			}
 		}
 
-		typ := reflect.TypeOf(obj)
-		if typ.Kind() == reflect.Ptr {
-			typ = typ.Elem()
-		}
-		kind := typ.Name()
-		handler, ok := configHandlers[kind]
-		if !ok {
-			logger.Warn("Unsupported type",
-				"type", kind,
-			)
-			continue
-		}
-
-		versiondObj, err := handler.MutateToVersiond([]InternalObject{obj})
+		data, err := Marshal(obj)
 		if err != nil {
-			return err
-		}
-		if len(versiondObj) != 1 {
-			return fmt.Errorf("unexpected length of versiond object: %d", len(versiondObj))
-		}
-
-		data, err := handler.Marshal(versiondObj[0])
-		if err != nil {
-			return err
-		}
-
-		data, err = yaml.JSONToYAML(data)
-		if err != nil {
+			if errors.Is(err, errUnsupportedType) {
+				logger.Warn("Unsupported type", err,
+					"obj", obj,
+				)
+				continue
+			}
 			return err
 		}
 
@@ -403,6 +402,95 @@ func SaveTo(ctx context.Context, w io.Writer, objs []InternalObject) error {
 		}
 	}
 	return nil
+}
+
+// UnmarshalWithType unmarshals the given raw message into the internal object.
+func UnmarshalWithType[T InternalObject, D string | []byte](raw D) (t T, err error) {
+	obj, err := Unmarshal(raw)
+	if err != nil {
+		return t, err
+	}
+	t, ok := obj.(T)
+	if !ok {
+		return t, fmt.Errorf("unexpected type %T %s", obj, log.KObj(obj))
+	}
+	return t, nil
+}
+
+// Unmarshal unmarshals the given raw message into the internal object.
+func Unmarshal[D string | []byte](d D) (InternalObject, error) {
+	meta := metav1.TypeMeta{}
+
+	raw := []byte(d)
+
+	raw, err := yaml.YAMLToJSON(raw)
+	if err != nil {
+		return nil, err
+	}
+
+	err = json.Unmarshal(raw, &meta)
+	if err != nil {
+		return nil, err
+	}
+
+	gvk := meta.GroupVersionKind()
+
+	handler, ok := configHandlers[gvk.Kind]
+	if !ok {
+		return nil, fmt.Errorf("%w: %s", errUnsupportedType, gvk.Kind)
+	}
+
+	vobj, err := handler.Unmarshal(raw)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal %s: %w", gvk.Kind, err)
+	}
+
+	iobj, err := handler.MutateToInternal([]versiondObject{vobj})
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert %s: %w", gvk.Kind, err)
+	}
+
+	if len(iobj) == 0 {
+		return nil, fmt.Errorf("failed to convert %s: no object", gvk.Kind)
+	}
+
+	if len(iobj) > 1 {
+		return nil, fmt.Errorf("failed to convert %s: too many objects", gvk.Kind)
+	}
+
+	return iobj[0], nil
+}
+
+// Marshal marshals the given internal object into a raw message.
+func Marshal(obj InternalObject) ([]byte, error) {
+	typ := reflect.TypeOf(obj)
+	if typ.Kind() == reflect.Ptr {
+		typ = typ.Elem()
+	}
+	kind := typ.Name()
+	handler, ok := configHandlers[kind]
+	if !ok {
+		return nil, fmt.Errorf("%w: %s", errUnsupportedType, kind)
+	}
+
+	versiondObj, err := handler.MutateToVersiond([]InternalObject{obj})
+	if err != nil {
+		return nil, err
+	}
+	if len(versiondObj) != 1 {
+		return nil, fmt.Errorf("unexpected length of versiond object: %d", len(versiondObj))
+	}
+
+	data, err := handler.Marshal(versiondObj[0])
+	if err != nil {
+		return nil, err
+	}
+
+	data, err = yaml.JSONToYAML(data)
+	if err != nil {
+		return nil, err
+	}
+	return data, nil
 }
 
 // FilterWithType returns a list of objects with the given type.
@@ -445,6 +533,18 @@ func FilterWithoutTypeFromContext[T InternalObject](ctx context.Context) (out []
 	return FilterWithoutType[T](objs)
 }
 
+func loadRawMessage(uri string) ([]json.RawMessage, error) {
+	stat, err := os.Stat(uri)
+	if err != nil {
+		return nil, err
+	}
+
+	if stat.IsDir() {
+		return loadRawFromKustomize(uri)
+	}
+	return loadRawFromFile(uri)
+}
+
 func loadRawFromFile(p string) ([]json.RawMessage, error) {
 	file, err := os.Open(p)
 	if err != nil {
@@ -456,9 +556,26 @@ func loadRawFromFile(p string) ([]json.RawMessage, error) {
 	return loadRaw(file)
 }
 
+func loadRawFromKustomize(dir string) ([]json.RawMessage, error) {
+	k := krusty.MakeKustomizer(krusty.MakeDefaultOptions())
+	fs := filesys.MakeFsOnDisk()
+
+	objs, err := k.Run(fs, dir)
+	if err != nil {
+		return nil, err
+	}
+
+	config, err := objs.AsYaml()
+	if err != nil {
+		return nil, err
+	}
+
+	return loadRaw(bytes.NewReader(config))
+}
+
 func loadRaw(r io.Reader) ([]json.RawMessage, error) {
 	var raws []json.RawMessage
-	decoder := utilyaml.NewYAMLToJSONDecoder(r)
+	decoder := yaml.NewDecoder(r)
 	for {
 		var raw json.RawMessage
 		err := decoder.Decode(&raw)

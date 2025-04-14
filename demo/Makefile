@@ -12,17 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-SVG_TERM=./node_modules/.bin/svg-term
+.PRECIOUS: %.cast
+%.cast: %.demo
+	make -C .. ./demo/$@
 
-$(SVG_TERM):
-	pip3 install asciinema
-	npm i svg-term-cli
+.PRECIOUS: %.svg
+%.svg: %.cast
+	make -C .. ./demo/$@
 
-%.svg: %.demo $(SVG_TERM)
-	@echo "Generating $@"
-	@$(SVG_TERM) --out "$@" \
-	  --window \
-	  --command "cd .. && ./demo/play-demo.sh ./demo/$<"
+%.mp4: %.svg
+	make -C .. ./demo/$@
 
 .PHONY: all
 all: $(patsubst %.demo,%.svg,$(wildcard *.demo))

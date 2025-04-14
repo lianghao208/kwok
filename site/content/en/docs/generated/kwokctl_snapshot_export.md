@@ -17,6 +17,7 @@ kwokctl snapshot export [flags]
       --page-buffer-size int32   Define the number of pages to buffer (default 10)
       --page-size int            Define the page size (default 500)
       --path string              Path to the snapshot
+      --record                   Record the change of the cluster
 ```
 
 ### Options inherited from parent commands
@@ -30,5 +31,5 @@ kwokctl snapshot export [flags]
 
 ### SEE ALSO
 
-* [kwokctl snapshot](kwokctl_snapshot.md)	 - Snapshot [save, restore, export] one of cluster
+* [kwokctl snapshot](kwokctl_snapshot.md)	 - Snapshot [save, restore, record, replay, export] one of cluster
 

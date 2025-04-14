@@ -17,46 +17,58 @@ limitations under the License.
 package components
 
 import (
+	"strings"
+
 	"sigs.k8s.io/kwok/pkg/apis/internalversion"
+	"sigs.k8s.io/kwok/pkg/consts"
 	"sigs.k8s.io/kwok/pkg/log"
 	"sigs.k8s.io/kwok/pkg/utils/format"
+	"sigs.k8s.io/kwok/pkg/utils/net"
 	"sigs.k8s.io/kwok/pkg/utils/version"
 )
 
 // BuildKwokControllerComponentConfig is the configuration for building a kwok controller component.
 type BuildKwokControllerComponentConfig struct {
-	Binary                   string
-	Image                    string
-	Version                  version.Version
-	Workdir                  string
-	BindAddress              string
-	Port                     uint32
-	ConfigPath               string
-	KubeconfigPath           string
-	CaCertPath               string
-	AdminCertPath            string
-	AdminKeyPath             string
-	NodeName                 string
-	Verbosity                log.Level
-	NodeLeaseDurationSeconds uint
-	ExtraArgs                []internalversion.ExtraArgs
-	ExtraVolumes             []internalversion.Volume
-	ExtraEnvs                []internalversion.Env
+	Runtime                           string
+	ProjectName                       string
+	Binary                            string
+	Image                             string
+	Version                           version.Version
+	Workdir                           string
+	BindAddress                       string
+	Port                              uint32
+	ConfigPath                        string
+	KubeconfigPath                    string
+	CaCertPath                        string
+	AdminCertPath                     string
+	AdminKeyPath                      string
+	NodeIP                            string
+	NodeName                          string
+	ManageNodesWithAnnotationSelector string
+	Verbosity                         log.Level
+	NodeLeaseDurationSeconds          uint
+	EnableCRDs                        []string
+	OtlpGrpcAddress                   string
 }
 
 // BuildKwokControllerComponent builds a kwok controller component.
 func BuildKwokControllerComponent(conf BuildKwokControllerComponentConfig) (component internalversion.Component) {
-	kwokControllerArgs := []string{
-		"--manage-all-nodes=true",
+	kwokControllerArgs := []string{}
+	if conf.ManageNodesWithAnnotationSelector == "" {
+		kwokControllerArgs = append(kwokControllerArgs,
+			"--manage-all-nodes=true",
+		)
+	} else {
+		kwokControllerArgs = append(kwokControllerArgs,
+			"--manage-all-nodes=false",
+			"--manage-nodes-with-annotation-selector="+conf.ManageNodesWithAnnotationSelector,
+		)
 	}
-	kwokControllerArgs = append(kwokControllerArgs, extraArgsToStrings(conf.ExtraArgs)...)
 
-	inContainer := conf.Image != ""
 	var volumes []internalversion.Volume
-	volumes = append(volumes, conf.ExtraVolumes...)
 	var ports []internalversion.Port
 
-	if inContainer {
+	if GetRuntimeMode(conf.Runtime) != RuntimeModeNative {
 		volumes = append(volumes,
 			internalversion.Volume{
 				HostPath:  conf.KubeconfigPath,
@@ -85,57 +97,107 @@ func BuildKwokControllerComponent(conf BuildKwokControllerComponentConfig) (comp
 			},
 		)
 
-		if conf.Port != 0 {
-			ports = append(ports,
-				internalversion.Port{
-					HostPort: conf.Port,
-					Port:     10247,
-				},
-			)
-		}
+		ports = append(
+			ports,
+			internalversion.Port{
+				Name:     "http",
+				HostPort: conf.Port,
+				Port:     10247,
+				Protocol: internalversion.ProtocolTCP,
+			},
+		)
 		kwokControllerArgs = append(kwokControllerArgs,
 			"--kubeconfig=/root/.kube/config",
 			"--config=/root/.kwok/kwok.yaml",
 			"--tls-cert-file=/etc/kubernetes/pki/admin.crt",
 			"--tls-private-key-file=/etc/kubernetes/pki/admin.key",
+			"--node-ip="+conf.NodeIP,
 			"--node-name="+conf.NodeName,
 			"--node-port=10247",
 			"--server-address="+conf.BindAddress+":10247",
 			"--node-lease-duration-seconds="+format.String(conf.NodeLeaseDurationSeconds),
 		)
 	} else {
+		ports = append(
+			ports,
+			internalversion.Port{
+				Name:     "http",
+				HostPort: 0,
+				Port:     conf.Port,
+				Protocol: internalversion.ProtocolTCP,
+			},
+		)
 		kwokControllerArgs = append(kwokControllerArgs,
 			"--kubeconfig="+conf.KubeconfigPath,
 			"--config="+conf.ConfigPath,
 			"--tls-cert-file="+conf.AdminCertPath,
 			"--tls-private-key-file="+conf.AdminKeyPath,
-			"--node-name=localhost",
+			"--node-ip="+conf.NodeIP,
+			"--node-name="+conf.NodeName,
 			"--node-port="+format.String(conf.Port),
 			"--server-address="+conf.BindAddress+":"+format.String(conf.Port),
 			"--node-lease-duration-seconds="+format.String(conf.NodeLeaseDurationSeconds),
 		)
 	}
 
+	var metricsHost string
+	switch GetRuntimeMode(conf.Runtime) {
+	case RuntimeModeNative:
+		metricsHost = net.LocalAddress + ":" + format.String(conf.Port)
+	case RuntimeModeContainer:
+		metricsHost = conf.ProjectName + "-" + consts.ComponentKwokController + ":10247"
+	case RuntimeModeCluster:
+		metricsHost = net.LocalAddress + ":10247"
+	}
+
+	var metric *internalversion.ComponentMetric
+	var metricsDiscovery *internalversion.ComponentMetric
+
+	if metricsHost != "" {
+		metric = &internalversion.ComponentMetric{
+			Scheme: "http",
+			Host:   metricsHost,
+			Path:   "/metrics",
+		}
+		metricsDiscovery = &internalversion.ComponentMetric{
+			Scheme: "http",
+			Host:   metricsHost,
+			Path:   "/discovery/prometheus",
+		}
+	}
+
 	if conf.Verbosity != log.LevelInfo {
 		kwokControllerArgs = append(kwokControllerArgs, "--v="+format.String(conf.Verbosity))
 	}
 
+	if len(conf.EnableCRDs) != 0 {
+		kwokControllerArgs = append(kwokControllerArgs, "--enable-crds="+strings.Join(conf.EnableCRDs, ","))
+	}
+
+	if conf.OtlpGrpcAddress != "" {
+		kwokControllerArgs = append(kwokControllerArgs,
+			"--tracing-endpoint="+conf.OtlpGrpcAddress,
+			"--tracing-sampling-rate-per-million=1000000",
+		)
+	}
+
 	envs := []internalversion.Env{}
-	envs = append(envs, conf.ExtraEnvs...)
 
 	return internalversion.Component{
-		Name:    "kwok-controller",
+		Name:    consts.ComponentKwokController,
 		Version: conf.Version.String(),
 		Links: []string{
-			"kube-apiserver",
+			consts.ComponentKubeApiserver,
 		},
-		Ports:   ports,
-		Command: []string{"kwok"},
-		Volumes: volumes,
-		Args:    kwokControllerArgs,
-		Binary:  conf.Binary,
-		Image:   conf.Image,
-		WorkDir: conf.Workdir,
-		Envs:    envs,
+		Ports:            ports,
+		Command:          []string{"kwok"},
+		Volumes:          volumes,
+		Args:             kwokControllerArgs,
+		Binary:           conf.Binary,
+		Image:            conf.Image,
+		Metric:           metric,
+		MetricsDiscovery: metricsDiscovery,
+		WorkDir:          conf.Workdir,
+		Envs:             envs,
 	}
 }

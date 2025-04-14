@@ -21,20 +21,25 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/http/httptest"
+	"sync"
 	"time"
 
 	"github.com/emicklei/go-restful/v3"
 	"github.com/wzshiming/cmux"
 	"github.com/wzshiming/cmux/pattern"
+	"go.opentelemetry.io/contrib/instrumentation/github.com/emicklei/go-restful/otelrestful"
+	oteltrace "go.opentelemetry.io/otel/trace"
+	corev1 "k8s.io/api/core/v1"
 	remotecommandconsts "k8s.io/apimachinery/pkg/util/remotecommand"
 
 	"sigs.k8s.io/kwok/pkg/apis/internalversion"
 	"sigs.k8s.io/kwok/pkg/apis/v1alpha1"
 	"sigs.k8s.io/kwok/pkg/client/clientset/versioned"
 	"sigs.k8s.io/kwok/pkg/config/resources"
-	"sigs.k8s.io/kwok/pkg/kwok/controllers"
 	"sigs.k8s.io/kwok/pkg/kwok/metrics"
 	"sigs.k8s.io/kwok/pkg/log"
+	"sigs.k8s.io/kwok/pkg/utils/informer"
 	"sigs.k8s.io/kwok/pkg/utils/maps"
 	"sigs.k8s.io/kwok/pkg/utils/pools"
 	"sigs.k8s.io/kwok/pkg/utils/slices"
@@ -46,6 +51,8 @@ const (
 
 // Server is a server that can serve HTTP/HTTPS requests.
 type Server struct {
+	ctx context.Context
+
 	typedKwokClient versioned.Interface
 
 	enableCRDs []string
@@ -56,20 +63,35 @@ type Server struct {
 	streamCreationTimeout time.Duration
 	bufPool               *pools.Pool[[]byte]
 
-	clusterPortForwards resources.Getter[[]*internalversion.ClusterPortForward]
-	portForwards        resources.Getter[[]*internalversion.PortForward]
-	clusterExecs        resources.Getter[[]*internalversion.ClusterExec]
-	execs               resources.Getter[[]*internalversion.Exec]
-	clusterLogs         resources.Getter[[]*internalversion.ClusterLogs]
-	logs                resources.Getter[[]*internalversion.Logs]
-	clusterAttaches     resources.Getter[[]*internalversion.ClusterAttach]
-	attaches            resources.Getter[[]*internalversion.Attach]
-	metrics             resources.Getter[[]*internalversion.Metric]
+	clusterPortForwards   resources.Getter[[]*internalversion.ClusterPortForward]
+	portForwards          resources.Getter[[]*internalversion.PortForward]
+	clusterExecs          resources.Getter[[]*internalversion.ClusterExec]
+	execs                 resources.Getter[[]*internalversion.Exec]
+	clusterLogs           resources.Getter[[]*internalversion.ClusterLogs]
+	logs                  resources.Getter[[]*internalversion.Logs]
+	clusterAttaches       resources.Getter[[]*internalversion.ClusterAttach]
+	attaches              resources.Getter[[]*internalversion.Attach]
+	clusterResourceUsages resources.Getter[[]*internalversion.ClusterResourceUsage]
+	resourceUsages        resources.Getter[[]*internalversion.ResourceUsage]
+	metrics               resources.Getter[[]*internalversion.Metric]
 
-	metricsWebService    *restful.WebService
 	metricsUpdateHandler maps.SyncMap[string, *metrics.UpdateHandler]
 
-	controller *controllers.Controller
+	cumulatives    map[string]cumulative
+	cumulativesMut sync.Mutex
+
+	env *metrics.Environment
+
+	dataSource      DataSource
+	nodeCacheGetter informer.Getter[*corev1.Node]
+	podCacheGetter  informer.Getter[*corev1.Pod]
+}
+
+// DataSource is the interface that provides data for the server handlers.
+type DataSource interface {
+	metrics.DataSource
+	ListNodes() []string
+	StartedContainersTotal(nodeName string) int64
 }
 
 // Config holds configurations needed by the server handlers.
@@ -77,40 +99,51 @@ type Config struct {
 	TypedKwokClient versioned.Interface
 	EnableCRDs      []string
 
-	ClusterPortForwards []*internalversion.ClusterPortForward
-	PortForwards        []*internalversion.PortForward
-	ClusterExecs        []*internalversion.ClusterExec
-	Execs               []*internalversion.Exec
-	ClusterLogs         []*internalversion.ClusterLogs
-	Logs                []*internalversion.Logs
-	ClusterAttaches     []*internalversion.ClusterAttach
-	Attaches            []*internalversion.Attach
-	Metrics             []*internalversion.Metric
-	Controller          *controllers.Controller
+	ClusterPortForwards   []*internalversion.ClusterPortForward
+	PortForwards          []*internalversion.PortForward
+	ClusterExecs          []*internalversion.ClusterExec
+	Execs                 []*internalversion.Exec
+	ClusterLogs           []*internalversion.ClusterLogs
+	Logs                  []*internalversion.Logs
+	ClusterAttaches       []*internalversion.ClusterAttach
+	Attaches              []*internalversion.Attach
+	ClusterResourceUsages []*internalversion.ClusterResourceUsage
+	ResourceUsages        []*internalversion.ResourceUsage
+	Metrics               []*internalversion.Metric
+
+	DataSource      DataSource
+	NodeCacheGetter informer.Getter[*corev1.Node]
+	PodCacheGetter  informer.Getter[*corev1.Pod]
 }
 
 // NewServer creates a new Server.
-func NewServer(config Config) (*Server, error) {
+func NewServer(conf Config) (*Server, error) {
 	container := restful.NewContainer()
 
 	s := &Server{
-		typedKwokClient:       config.TypedKwokClient,
-		enableCRDs:            config.EnableCRDs,
+		typedKwokClient:       conf.TypedKwokClient,
+		enableCRDs:            conf.EnableCRDs,
 		restfulCont:           container,
 		idleTimeout:           1 * time.Hour,
 		streamCreationTimeout: remotecommandconsts.DefaultStreamCreationTimeout,
 
-		clusterPortForwards: resources.NewStaticGetter(config.ClusterPortForwards),
-		portForwards:        resources.NewStaticGetter(config.PortForwards),
-		clusterExecs:        resources.NewStaticGetter(config.ClusterExecs),
-		execs:               resources.NewStaticGetter(config.Execs),
-		clusterLogs:         resources.NewStaticGetter(config.ClusterLogs),
-		logs:                resources.NewStaticGetter(config.Logs),
-		clusterAttaches:     resources.NewStaticGetter(config.ClusterAttaches),
-		attaches:            resources.NewStaticGetter(config.Attaches),
-		metrics:             resources.NewStaticGetter(config.Metrics),
+		clusterPortForwards:   resources.NewStaticGetter(conf.ClusterPortForwards),
+		portForwards:          resources.NewStaticGetter(conf.PortForwards),
+		clusterExecs:          resources.NewStaticGetter(conf.ClusterExecs),
+		execs:                 resources.NewStaticGetter(conf.Execs),
+		clusterLogs:           resources.NewStaticGetter(conf.ClusterLogs),
+		logs:                  resources.NewStaticGetter(conf.Logs),
+		clusterAttaches:       resources.NewStaticGetter(conf.ClusterAttaches),
+		attaches:              resources.NewStaticGetter(conf.Attaches),
+		clusterResourceUsages: resources.NewStaticGetter(conf.ClusterResourceUsages),
+		resourceUsages:        resources.NewStaticGetter(conf.ResourceUsages),
+		metrics:               resources.NewStaticGetter(conf.Metrics),
 
-		controller: config.Controller,
+		cumulatives: map[string]cumulative{},
+
+		dataSource:      conf.DataSource,
+		podCacheGetter:  conf.PodCacheGetter,
+		nodeCacheGetter: conf.NodeCacheGetter,
 
 		bufPool: pools.NewPool(func() []byte {
 			return make([]byte, 32*1024)
@@ -313,6 +346,52 @@ func (s *Server) initWatchCRD(ctx context.Context) ([]resources.Starter, error) 
 			)
 			starters = append(starters, attaches)
 			s.attaches = attaches
+		case v1alpha1.ClusterResourceUsageKind:
+			if len(s.clusterResourceUsages.Get()) != 0 {
+				return nil, fmt.Errorf("cluster resource usage already exists, cannot watch CRD")
+			}
+			clusterResourceUsages := resources.NewDynamicGetter[
+				[]*internalversion.ClusterResourceUsage,
+				*v1alpha1.ClusterResourceUsage,
+				*v1alpha1.ClusterResourceUsageList,
+			](
+				cli.KwokV1alpha1().ClusterResourceUsages(),
+				func(objs []*v1alpha1.ClusterResourceUsage) []*internalversion.ClusterResourceUsage {
+					return slices.FilterAndMap(objs, func(obj *v1alpha1.ClusterResourceUsage) (*internalversion.ClusterResourceUsage, bool) {
+						r, err := internalversion.ConvertToInternalClusterResourceUsage(obj)
+						if err != nil {
+							logger.Error("failed to convert to internal cluster resource usage", err, "obj", obj)
+							return nil, false
+						}
+						return r, true
+					})
+				},
+			)
+			starters = append(starters, clusterResourceUsages)
+			s.clusterResourceUsages = clusterResourceUsages
+		case v1alpha1.ResourceUsageKind:
+			if len(s.resourceUsages.Get()) != 0 {
+				return nil, fmt.Errorf("resource usage already exists, cannot watch CRD")
+			}
+			resourceUsages := resources.NewDynamicGetter[
+				[]*internalversion.ResourceUsage,
+				*v1alpha1.ResourceUsage,
+				*v1alpha1.ResourceUsageList,
+			](
+				cli.KwokV1alpha1().ResourceUsages(""),
+				func(objs []*v1alpha1.ResourceUsage) []*internalversion.ResourceUsage {
+					return slices.FilterAndMap(objs, func(obj *v1alpha1.ResourceUsage) (*internalversion.ResourceUsage, bool) {
+						r, err := internalversion.ConvertToInternalResourceUsage(obj)
+						if err != nil {
+							logger.Error("failed to convert to internal resource usage", err, "obj", obj)
+							return nil, false
+						}
+						return r, true
+					})
+				},
+			)
+			starters = append(starters, resourceUsages)
+			s.resourceUsages = resourceUsages
 		case v1alpha1.MetricKind:
 			if len(s.metrics.Get()) != 0 {
 				return nil, fmt.Errorf("metrics already exists, cannot watch CRD")
@@ -364,6 +443,10 @@ func (s *Server) InstallCRD(ctx context.Context) error {
 	return nil
 }
 
+func (s *Server) InstallTracingFilter(tp oteltrace.TracerProvider) {
+	s.restfulCont.Filter(otelrestful.OTelFilter("kwok-controller", otelrestful.WithTracerProvider(tp)))
+}
+
 // Run runs the specified Server.
 // This should never exit.
 func (s *Server) Run(ctx context.Context, address string, certFile, privateKeyFile string) error {
@@ -385,6 +468,8 @@ func (s *Server) Run(ctx context.Context, address string, certFile, privateKeyFi
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+
+	s.ctx = ctx
 
 	errCh := make(chan error, 1)
 
@@ -408,6 +493,22 @@ func (s *Server) Run(ctx context.Context, address string, certFile, privateKeyFi
 				errCh <- fmt.Errorf("serve https: %w", err)
 			}
 		}()
+	} else {
+		logger.Info("Starting test HTTPS server",
+			"address", address,
+		)
+		svc := httptest.Server{
+			Listener: tlsListener,
+			Config: &http.Server{
+				ReadHeaderTimeout: 5 * time.Second,
+				BaseContext: func(_ net.Listener) context.Context {
+					return ctx
+				},
+				Addr:    address,
+				Handler: s.restfulCont,
+			},
+		}
+		svc.StartTLS()
 	}
 
 	go func() {

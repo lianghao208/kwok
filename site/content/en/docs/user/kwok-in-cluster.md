@@ -1,5 +1,7 @@
 ---
 title: "`kwok` in Cluster"
+aliases:
+  - /docs/user/kwok-in-cluster-old
 ---
 
 # Deploy `kwok` in a Cluster
@@ -9,6 +11,60 @@ title: "`kwok` in Cluster"
 This document walks you through how to deploy `kwok` in a Kubernetes cluster.
 
 {{< /hint >}}
+
+{{< tabs "install-in-cluster" >}}
+
+{{< tab "YAML" >}}
+
+## Variables preparation
+
+``` bash
+# KWOK repository
+KWOK_REPO=kubernetes-sigs/kwok
+# Get latest
+KWOK_LATEST_RELEASE=$(curl "https://api.github.com/repos/${KWOK_REPO}/releases/latest" | jq -r '.tag_name')
+```
+
+## Deploy kwok and set up custom resource definitions (CRDs)
+
+``` bash
+kubectl apply -f "https://github.com/${KWOK_REPO}/releases/download/${KWOK_LATEST_RELEASE}/kwok.yaml"
+```
+
+## Set up default custom resources (CRs) of stages (required)
+
+{{< hint "warning" >}}
+NOTE: This configures the pod/node emulation behavior, if not it will do nothing.
+{{< /hint >}}
+
+``` bash 
+kubectl apply -f "https://github.com/${KWOK_REPO}/releases/download/${KWOK_LATEST_RELEASE}/stage-fast.yaml"
+```
+
+## Set up default custom resources (CRs) of resource usage (optional)
+
+This allows to simulate the resource usage of nodes, pods and containers.
+
+``` bash 
+kubectl apply -f "https://github.com/${KWOK_REPO}/releases/download/${KWOK_LATEST_RELEASE}/metrics-usage.yaml"
+```
+
+The above configuration sets the CPU and memory usage of all the containers managed by `kwok` to `1m` and to `1Mi` respectively.
+To override the defaults, you can add annotation `"kwok.x-k8s.io/usage-cpu"` (for cpu usage) and
+`"kwok.x-k8s.io/usage-memory"` (for memory usage) with any quantity value you want to the fake pods.
+
+The resource usage simulation used above is annotation-based and the configuration is available at [here](https://github.com/kubernetes-sigs/kwok/tree/main/kustomize/metrics/usage).
+For the explanation of how it works and more complex resource usage simulation methods, please refer to [ResourceUsage configuration]({{< relref "/docs/user/resource-usage-configuration" >}}).
+
+{{< /tab >}}
+
+{{< tab "Helm Chart" >}}
+
+The kwok helm chart is listed on the [artifact hub](https://artifacthub.io/packages/helm/kwok/kwok).
+
+{{< /tab >}}
+
+{{< tab "Kustomize (<v0.4)" >}}
 
 ## Variables preparation
 
@@ -50,6 +106,21 @@ Finally, we're able to deploy `kwok`:
 ``` bash
 kubectl apply -f "${KWOK_WORK_DIR}/kwok.yaml"
 ```
+
+## Apply the default custom resources (CRs) of stages (required)
+
+{{< hint "warning" >}}
+NOTE: This configures the pod/node emulation behavior, if not it will do nothing.
+When running versions <0.4 this step isn't required.
+{{< /hint >}}
+
+``` bash 
+kubectl apply -f "https://github.com/${KWOK_REPO}/releases/download/${KWOK_LATEST_RELEASE}/stage-fast.yaml"
+```
+
+{{< /tab >}}
+
+{{< /tabs>}}
 
 ## Next steps
 

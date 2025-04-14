@@ -3,17 +3,30 @@ on:
   pull_request:
     types: [opened, edited, synchronize, reopened]
     branches:
-      - main
+    - main
+
+env:
+  GO_VERSION: "1.23.0"
+  GOLANGCI_VERSION: "1.60.1"
+
 jobs:
   golangci:
     name: lint
-    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        os:
+        - ubuntu-latest
+        - macos-latest
+        - windows-latest
+    runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/setup-go@v4
-        with:
-          go-version: "1.20"
-      - uses: actions/checkout@v3
-      - name: golangci-lint
-        uses: golangci/golangci-lint-action@v3
-        with:
-          version: v1.51.2
+    - uses: actions/setup-go@v5
+      with:
+        go-version: ${{ env.GO_VERSION }}
+    - uses: actions/checkout@v4
+    - name: golangci-lint
+      uses: golangci/golangci-lint-action@v6
+      with:
+        version: v${{ env.GOLANGCI_VERSION }}
+        args: --timeout=8m --config=.golangci.yaml --new --fix

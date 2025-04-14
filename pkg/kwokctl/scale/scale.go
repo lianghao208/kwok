@@ -36,7 +36,6 @@ import (
 	"sigs.k8s.io/kwok/pkg/kwokctl/snapshot"
 	"sigs.k8s.io/kwok/pkg/log"
 	"sigs.k8s.io/kwok/pkg/utils/client"
-	"sigs.k8s.io/kwok/pkg/utils/expression"
 	"sigs.k8s.io/kwok/pkg/utils/gotpl"
 	utilsnet "sigs.k8s.io/kwok/pkg/utils/net"
 	"sigs.k8s.io/kwok/pkg/utils/yaml"
@@ -282,38 +281,22 @@ func Scale(ctx context.Context, clientset client.Clientset, conf Config) error {
 	}, wantCreate)
 
 	ctx = log.NewContext(ctx, logger)
-	err = snapshot.Load(ctx, clientset, gen, nil)
+
+	loader, err := snapshot.NewLoader(snapshot.LoadConfig{
+		Clientset: clientset,
+		NoFilers:  true,
+	})
+	if err != nil {
+		return err
+	}
+
+	decoder := yaml.NewDecoder(gen)
+	err = loader.Load(ctx, decoder)
 	if err != nil {
 		return err
 	}
 
 	return nil
-}
-
-// NewParameters parses the parameters.
-func NewParameters(ctx context.Context, raw json.RawMessage, params []string) (any, error) {
-	var param any
-	err := json.Unmarshal(raw, &param)
-	if err != nil {
-		return nil, fmt.Errorf("unmarshal params error: %w", err)
-	}
-
-	for _, p := range params {
-		q, err := expression.NewQuery(p)
-		if err != nil {
-			return nil, fmt.Errorf("parse param %s error: %w", p, err)
-		}
-		datas, err := q.Execute(ctx, param)
-		if err != nil {
-			return nil, fmt.Errorf("execute param %s with %v error: %w", p, param, err)
-		}
-		if len(datas) != 1 {
-			return nil, fmt.Errorf("unexpected result: %v", datas)
-		}
-		param = datas[0]
-	}
-
-	return param, nil
 }
 
 var (

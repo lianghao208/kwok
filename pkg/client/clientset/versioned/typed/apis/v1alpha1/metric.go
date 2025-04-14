@@ -1,5 +1,5 @@
 /*
-Copyright 2023 The Kubernetes Authors.
+Copyright The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,14 +19,13 @@ limitations under the License.
 package v1alpha1
 
 import (
-	"context"
-	"time"
+	context "context"
 
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	types "k8s.io/apimachinery/pkg/types"
 	watch "k8s.io/apimachinery/pkg/watch"
-	rest "k8s.io/client-go/rest"
-	v1alpha1 "sigs.k8s.io/kwok/pkg/apis/v1alpha1"
+	gentype "k8s.io/client-go/gentype"
+	apisv1alpha1 "sigs.k8s.io/kwok/pkg/apis/v1alpha1"
 	scheme "sigs.k8s.io/kwok/pkg/client/clientset/versioned/scheme"
 )
 
@@ -38,147 +37,34 @@ type MetricsGetter interface {
 
 // MetricInterface has methods to work with Metric resources.
 type MetricInterface interface {
-	Create(ctx context.Context, metric *v1alpha1.Metric, opts v1.CreateOptions) (*v1alpha1.Metric, error)
-	Update(ctx context.Context, metric *v1alpha1.Metric, opts v1.UpdateOptions) (*v1alpha1.Metric, error)
-	UpdateStatus(ctx context.Context, metric *v1alpha1.Metric, opts v1.UpdateOptions) (*v1alpha1.Metric, error)
+	Create(ctx context.Context, metric *apisv1alpha1.Metric, opts v1.CreateOptions) (*apisv1alpha1.Metric, error)
+	Update(ctx context.Context, metric *apisv1alpha1.Metric, opts v1.UpdateOptions) (*apisv1alpha1.Metric, error)
+	// Add a +genclient:noStatus comment above the type to avoid generating UpdateStatus().
+	UpdateStatus(ctx context.Context, metric *apisv1alpha1.Metric, opts v1.UpdateOptions) (*apisv1alpha1.Metric, error)
 	Delete(ctx context.Context, name string, opts v1.DeleteOptions) error
 	DeleteCollection(ctx context.Context, opts v1.DeleteOptions, listOpts v1.ListOptions) error
-	Get(ctx context.Context, name string, opts v1.GetOptions) (*v1alpha1.Metric, error)
-	List(ctx context.Context, opts v1.ListOptions) (*v1alpha1.MetricList, error)
+	Get(ctx context.Context, name string, opts v1.GetOptions) (*apisv1alpha1.Metric, error)
+	List(ctx context.Context, opts v1.ListOptions) (*apisv1alpha1.MetricList, error)
 	Watch(ctx context.Context, opts v1.ListOptions) (watch.Interface, error)
-	Patch(ctx context.Context, name string, pt types.PatchType, data []byte, opts v1.PatchOptions, subresources ...string) (result *v1alpha1.Metric, err error)
+	Patch(ctx context.Context, name string, pt types.PatchType, data []byte, opts v1.PatchOptions, subresources ...string) (result *apisv1alpha1.Metric, err error)
 	MetricExpansion
 }
 
 // metrics implements MetricInterface
 type metrics struct {
-	client rest.Interface
+	*gentype.ClientWithList[*apisv1alpha1.Metric, *apisv1alpha1.MetricList]
 }
 
 // newMetrics returns a Metrics
 func newMetrics(c *KwokV1alpha1Client) *metrics {
 	return &metrics{
-		client: c.RESTClient(),
+		gentype.NewClientWithList[*apisv1alpha1.Metric, *apisv1alpha1.MetricList](
+			"metrics",
+			c.RESTClient(),
+			scheme.ParameterCodec,
+			"",
+			func() *apisv1alpha1.Metric { return &apisv1alpha1.Metric{} },
+			func() *apisv1alpha1.MetricList { return &apisv1alpha1.MetricList{} },
+		),
 	}
-}
-
-// Get takes name of the metric, and returns the corresponding metric object, and an error if there is any.
-func (c *metrics) Get(ctx context.Context, name string, options v1.GetOptions) (result *v1alpha1.Metric, err error) {
-	result = &v1alpha1.Metric{}
-	err = c.client.Get().
-		Resource("metrics").
-		Name(name).
-		VersionedParams(&options, scheme.ParameterCodec).
-		Do(ctx).
-		Into(result)
-	return
-}
-
-// List takes label and field selectors, and returns the list of Metrics that match those selectors.
-func (c *metrics) List(ctx context.Context, opts v1.ListOptions) (result *v1alpha1.MetricList, err error) {
-	var timeout time.Duration
-	if opts.TimeoutSeconds != nil {
-		timeout = time.Duration(*opts.TimeoutSeconds) * time.Second
-	}
-	result = &v1alpha1.MetricList{}
-	err = c.client.Get().
-		Resource("metrics").
-		VersionedParams(&opts, scheme.ParameterCodec).
-		Timeout(timeout).
-		Do(ctx).
-		Into(result)
-	return
-}
-
-// Watch returns a watch.Interface that watches the requested metrics.
-func (c *metrics) Watch(ctx context.Context, opts v1.ListOptions) (watch.Interface, error) {
-	var timeout time.Duration
-	if opts.TimeoutSeconds != nil {
-		timeout = time.Duration(*opts.TimeoutSeconds) * time.Second
-	}
-	opts.Watch = true
-	return c.client.Get().
-		Resource("metrics").
-		VersionedParams(&opts, scheme.ParameterCodec).
-		Timeout(timeout).
-		Watch(ctx)
-}
-
-// Create takes the representation of a metric and creates it.  Returns the server's representation of the metric, and an error, if there is any.
-func (c *metrics) Create(ctx context.Context, metric *v1alpha1.Metric, opts v1.CreateOptions) (result *v1alpha1.Metric, err error) {
-	result = &v1alpha1.Metric{}
-	err = c.client.Post().
-		Resource("metrics").
-		VersionedParams(&opts, scheme.ParameterCodec).
-		Body(metric).
-		Do(ctx).
-		Into(result)
-	return
-}
-
-// Update takes the representation of a metric and updates it. Returns the server's representation of the metric, and an error, if there is any.
-func (c *metrics) Update(ctx context.Context, metric *v1alpha1.Metric, opts v1.UpdateOptions) (result *v1alpha1.Metric, err error) {
-	result = &v1alpha1.Metric{}
-	err = c.client.Put().
-		Resource("metrics").
-		Name(metric.Name).
-		VersionedParams(&opts, scheme.ParameterCodec).
-		Body(metric).
-		Do(ctx).
-		Into(result)
-	return
-}
-
-// UpdateStatus was generated because the type contains a Status member.
-// Add a +genclient:noStatus comment above the type to avoid generating UpdateStatus().
-func (c *metrics) UpdateStatus(ctx context.Context, metric *v1alpha1.Metric, opts v1.UpdateOptions) (result *v1alpha1.Metric, err error) {
-	result = &v1alpha1.Metric{}
-	err = c.client.Put().
-		Resource("metrics").
-		Name(metric.Name).
-		SubResource("status").
-		VersionedParams(&opts, scheme.ParameterCodec).
-		Body(metric).
-		Do(ctx).
-		Into(result)
-	return
-}
-
-// Delete takes name of the metric and deletes it. Returns an error if one occurs.
-func (c *metrics) Delete(ctx context.Context, name string, opts v1.DeleteOptions) error {
-	return c.client.Delete().
-		Resource("metrics").
-		Name(name).
-		Body(&opts).
-		Do(ctx).
-		Error()
-}
-
-// DeleteCollection deletes a collection of objects.
-func (c *metrics) DeleteCollection(ctx context.Context, opts v1.DeleteOptions, listOpts v1.ListOptions) error {
-	var timeout time.Duration
-	if listOpts.TimeoutSeconds != nil {
-		timeout = time.Duration(*listOpts.TimeoutSeconds) * time.Second
-	}
-	return c.client.Delete().
-		Resource("metrics").
-		VersionedParams(&listOpts, scheme.ParameterCodec).
-		Timeout(timeout).
-		Body(&opts).
-		Do(ctx).
-		Error()
-}
-
-// Patch applies the patch and returns the patched metric.
-func (c *metrics) Patch(ctx context.Context, name string, pt types.PatchType, data []byte, opts v1.PatchOptions, subresources ...string) (result *v1alpha1.Metric, err error) {
-	result = &v1alpha1.Metric{}
-	err = c.client.Patch(pt).
-		Resource("metrics").
-		Name(name).
-		SubResource(subresources...).
-		VersionedParams(&opts, scheme.ParameterCodec).
-		Body(data).
-		Do(ctx).
-		Into(result)
-	return
 }

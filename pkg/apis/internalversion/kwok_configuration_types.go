@@ -27,12 +27,13 @@ type KwokConfiguration struct {
 	metav1.ObjectMeta
 	// Options holds information about the default value.
 	Options KwokConfigurationOptions
+	// Tracing holds tracing configuration.
+	Tracing TracingConfiguration
 }
 
 // KwokConfigurationOptions holds information about the options.
 type KwokConfigurationOptions struct {
 	// EnableCRDs is a list of CRDs to enable.
-	// Once listed in this field, it will no longer be supported by the --config flag.
 	EnableCRDs []string
 
 	// The default IP assigned to the Pod on maintained Nodes.
@@ -53,6 +54,9 @@ type KwokConfigurationOptions struct {
 	// TLSPrivateKeyFile is the ile containing x509 private key
 	TLSPrivateKeyFile string
 
+	// ManageSingleNode is the option to manage a single node name
+	ManageSingleNode string
+
 	// Default option to manage (i.e., maintain heartbeat/liveness of) all Nodes or not.
 	ManageAllNodes bool
 
@@ -63,22 +67,25 @@ type KwokConfigurationOptions struct {
 	ManageNodesWithLabelSelector string
 
 	// If a Node/Pod is on a managed Node and has this annotation status will not be modified
+	// Deprecated: use Stage API instead
 	DisregardStatusWithAnnotationSelector string
 
 	// If a Node/Pod is on a managed Node and has this label status will not be modified
+	// Deprecated: use Stage API instead
 	DisregardStatusWithLabelSelector string
 
 	// ServerAddress is server address of the Kwok.
 	ServerAddress string
 
 	// Experimental support for getting pod ip from CNI, for CNI-related components, Only works with Linux.
+	// Deprecated: It will be removed and will be supported in the form of plugins
 	EnableCNI bool
 
-	// enableDebuggingHandlers enables server endpoints for log collection
+	// EnableDebuggingHandlers enables server endpoints for log collection
 	// and local running of containers and commands
 	EnableDebuggingHandlers bool
 
-	// enableContentionProfiling enables lock contention profiling, if enableDebuggingHandlers is true.
+	// EnableContentionProfiling enables lock contention profiling, if enableDebuggingHandlers is true.
 	EnableContentionProfiling bool
 
 	// EnableProfiling enables /debug/pprof handler.
@@ -95,4 +102,16 @@ type KwokConfigurationOptions struct {
 
 	// NodeLeaseParallelism is the number of NodeLeases that are allowed to be processed in parallel.
 	NodeLeaseParallelism uint
+}
+
+// TracingConfiguration provides versioned configuration for OpenTelemetry tracing clients.
+type TracingConfiguration struct {
+	// Endpoint of the collector this component will report traces to.
+	// The connection is insecure, and does not currently support TLS.
+	Endpoint string
+
+	// SamplingRatePerMillion is the number of samples to collect per million spans.
+	// Recommended is unset. If unset, sampler respects its parent span's sampling
+	// rate, but otherwise never samples.
+	SamplingRatePerMillion int32
 }

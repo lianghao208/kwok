@@ -40,6 +40,7 @@ type flagpole struct {
 	Timeout    time.Duration
 	Wait       time.Duration
 	Kubeconfig string
+	ExtraArgs  []string
 
 	*internalversion.KwokctlConfiguration
 }
@@ -61,12 +62,21 @@ func NewCommand(ctx context.Context) *cobra.Command {
 	}
 
 	cmd.Flags().Uint32Var(&flags.Options.KubeApiserverPort, "kube-apiserver-port", flags.Options.KubeApiserverPort, `Port of the apiserver (default random)`)
+	cmd.Flags().Uint32Var(&flags.Options.KubeApiserverInsecurePort, "kube-apiserver-insecure-port", flags.Options.KubeApiserverInsecurePort, `Insecure port of the apiserver`)
 	cmd.Flags().Uint32Var(&flags.Options.PrometheusPort, "prometheus-port", flags.Options.PrometheusPort, `Port to expose Prometheus metrics`)
+	cmd.Flags().Uint32Var(&flags.Options.JaegerPort, "jaeger-port", flags.Options.JaegerPort, `Port to expose Jaeger UI`)
 	cmd.Flags().BoolVar(&flags.Options.SecurePort, "secure-port", flags.Options.SecurePort, `The apiserver port on which to serve HTTPS with authentication and authorization, is not available before Kubernetes 1.13.0`)
 	cmd.Flags().BoolVar(&flags.Options.QuietPull, "quiet-pull", flags.Options.QuietPull, `Pull without printing progress information`)
 	cmd.Flags().StringVar(&flags.Options.KubeSchedulerConfig, "kube-scheduler-config", flags.Options.KubeSchedulerConfig, `Path to a kube-scheduler configuration file`)
+	cmd.Flags().StringSliceVar(&flags.Options.Components, "components", flags.Options.Components, `Default of components`)
+	cmd.Flags().StringSliceVar(&flags.Options.Disable, "disable", flags.Options.Disable, `Disable list of components`)
+	cmd.Flags().StringSliceVar(&flags.Options.Enable, "enable", flags.Options.Enable, `Enable list of components`)
 	cmd.Flags().BoolVar(&flags.Options.DisableKubeScheduler, "disable-kube-scheduler", flags.Options.DisableKubeScheduler, `Disable the kube-scheduler`)
+	_ = cmd.Flags().MarkDeprecated("disable-kube-scheduler", "--disable-kube-scheduler will be removed in a future release, please use --disable kube-scheduler instead")
 	cmd.Flags().BoolVar(&flags.Options.DisableKubeControllerManager, "disable-kube-controller-manager", flags.Options.DisableKubeControllerManager, `Disable the kube-controller-manager`)
+	_ = cmd.Flags().MarkDeprecated("disable-kube-controller-manager", "--disable-kube-controller-manager will be removed in a future release, please use --disable kube-controller-manager instead")
+	cmd.Flags().BoolVar(&flags.Options.EnableMetricsServer, "enable-metrics-server", flags.Options.EnableMetricsServer, `Enable the metrics-server`)
+	_ = cmd.Flags().MarkDeprecated("enable-metrics-server", "--enable-metrics-server will be removed in a future release, please use --enable metrics-server instead")
 	cmd.Flags().StringVar(&flags.Options.EtcdImage, "etcd-image", flags.Options.EtcdImage, `Image of etcd, only for docker/podman/nerdctl runtime
 '${KWOK_KUBE_IMAGE_PREFIX}/etcd:${KWOK_ETCD_VERSION}'
 `)
@@ -85,12 +95,22 @@ func NewCommand(ctx context.Context) *cobra.Command {
 	cmd.Flags().StringVar(&flags.Options.KwokControllerImage, "kwok-controller-image", flags.Options.KwokControllerImage, `Image of kwok-controller, only for docker/podman/nerdctl/kind/kind-podman runtime
 '${KWOK_IMAGE_PREFIX}/kwok:${KWOK_VERSION}'
 `)
+	cmd.Flags().StringVar(&flags.Options.MetricsServerImage, "metrics-server-image", flags.Options.MetricsServerImage, `Image of metrics-server, only for docker/podman/nerdctl/kind/kind-podman runtime
+'${KWOK_METRICS_SERVER_IMAGE_PREFIX}/metrics-server:${KWOK_METRICS_SERVER_VERSION}'
+`)
 	cmd.Flags().StringVar(&flags.Options.PrometheusImage, "prometheus-image", flags.Options.PrometheusImage, `Image of Prometheus, only for docker/podman/nerdctl/kind/kind-podman runtime
 '${KWOK_PROMETHEUS_IMAGE_PREFIX}/prometheus:${KWOK_PROMETHEUS_VERSION}'
+`)
+	cmd.Flags().StringVar(&flags.Options.JaegerImage, "jaeger-image", flags.Options.JaegerImage, `Image of Jaeger, only for docker/podman/nerdctl/kind/kind-podman runtime
+'${KWOK_JAEGER_IMAGE_PREFIX}/all-in-one:${KWOK_JAEGER_VERSION}'
 `)
 	cmd.Flags().Uint32Var(&flags.Options.KwokControllerPort, "controller-port", flags.Options.KwokControllerPort, `Port of kwok-controller given to the host`)
 	cmd.Flags().StringVar(&flags.Options.KindNodeImage, "kind-node-image", flags.Options.KindNodeImage, `Image of kind node, only for kind/kind-podman runtime
 '${KWOK_KIND_NODE_IMAGE_PREFIX}/node:${KWOK_KUBE_VERSION}'
+`)
+	cmd.Flags().Uint32Var(&flags.Options.DashboardPort, "dashboard-port", flags.Options.DashboardPort, `Port of dashboard given to the host`)
+	cmd.Flags().StringVar(&flags.Options.DashboardImage, "dashboard-image", flags.Options.DashboardImage, `Image of dashboard, only for docker/podman/nerdctl/kind/kind-podman runtime
+'${KWOK_DASHBOARD_IMAGE_PREFIX}/dashboard:${KWOK_DASHBOARD_VERSION}'
 `)
 	cmd.Flags().StringVar(&flags.Options.KubeApiserverBinary, "kube-apiserver-binary", flags.Options.KubeApiserverBinary, `Binary of kube-apiserver, only for binary runtime
 `)
@@ -103,13 +123,17 @@ func NewCommand(ctx context.Context) *cobra.Command {
 	cmd.Flags().StringVar(&flags.Options.EtcdBinary, "etcd-binary", flags.Options.EtcdBinary, `Binary of etcd, only for binary runtime`)
 	cmd.Flags().StringVar(&flags.Options.EtcdBinaryTar, "etcd-binary-tar", flags.Options.EtcdBinaryTar, `Tar of etcd, if --etcd-binary is set, this is ignored, only for binary runtime
 `)
+	_ = cmd.Flags().MarkDeprecated("etcd-binary-tar", "--etcd-binary-tar will be removed in a future release, please use --etcd-binary instead")
+	cmd.Flags().StringVar(&flags.Options.EtcdPrefix, "etcd-prefix", flags.Options.EtcdPrefix, `prefix of the key`)
+	cmd.Flags().StringVar(&flags.Options.MetricsServerBinary, "metrics-server-binary", flags.Options.MetricsServerBinary, `Binary of metrics-server, only for binary runtime`)
 	cmd.Flags().StringVar(&flags.Options.PrometheusBinary, "prometheus-binary", flags.Options.PrometheusBinary, `Binary of Prometheus, only for binary runtime`)
 	cmd.Flags().StringVar(&flags.Options.PrometheusBinaryTar, "prometheus-binary-tar", flags.Options.PrometheusBinaryTar, `Tar of Prometheus, if --prometheus-binary is set, this is ignored, only for binary runtime
 `)
-	cmd.Flags().StringVar(&flags.Options.DockerComposeBinary, "docker-compose-binary", flags.Options.DockerComposeBinary, `Binary of Docker-compose, only for docker runtime
+	_ = cmd.Flags().MarkDeprecated("prometheus-binary-tar", "--prometheus-binary-tar will be removed in a future release, please use --prometheus-binary instead")
+	cmd.Flags().StringVar(&flags.Options.JaegerBinary, "jaeger-binary", flags.Options.JaegerBinary, `Binary of Jaeger, only for binary runtime`)
+	cmd.Flags().StringVar(&flags.Options.JaegerBinaryTar, "jaeger-binary-tar", flags.Options.JaegerBinaryTar, `Tar of Jaeger, if --jaeger-binary is set, this is ignored, only for binary runtime
 `)
-	_ = cmd.Flags().MarkDeprecated("docker-compose-binary", "docker compose will be removed in a future release")
-
+	_ = cmd.Flags().MarkDeprecated("jaeger-binary-tar", "--jaeger-binary-tar will be removed in a future release, please use --jaeger-binary instead")
 	cmd.Flags().StringVar(&flags.Options.KindBinary, "kind-binary", flags.Options.KindBinary, `Binary of kind, only for kind/kind-podman runtime
 `)
 	cmd.Flags().StringVar(&flags.Options.KubeFeatureGates, "kube-feature-gates", flags.Options.KubeFeatureGates, `A set of key=value pairs that describe feature gates for alpha/experimental features of Kubernetes`)
@@ -122,7 +146,57 @@ func NewCommand(ctx context.Context) *cobra.Command {
 	cmd.Flags().DurationVar(&flags.Wait, "wait", 0, "Wait for the cluster to be ready")
 	cmd.Flags().StringVar(&flags.Kubeconfig, "kubeconfig", flags.Kubeconfig, "The path to the kubeconfig file will be added to the newly created cluster and set to current-context")
 	cmd.Flags().BoolVar(&flags.Options.DisableQPSLimits, "disable-qps-limits", flags.Options.DisableQPSLimits, "Disable QPS limits for components")
+	cmd.Flags().StringSliceVar(&flags.Options.EnableCRDs, "enable-crds", flags.Options.EnableCRDs, "List of CRDs to enable")
+	cmd.Flags().UintVar(&flags.Options.NodeLeaseDurationSeconds, "node-lease-duration-seconds", flags.Options.NodeLeaseDurationSeconds, "Duration of node lease in seconds")
+	cmd.Flags().Float64Var(&flags.Options.HeartbeatFactor, "heartbeat-factor", flags.Options.HeartbeatFactor, "Scale factor for all about heartbeat")
+	cmd.Flags().StringVar(&flags.Options.EtcdQuotaBackendSize, "etcd-quota-backend-size", flags.Options.EtcdQuotaBackendSize, "Quota backend size for etcd")
+	cmd.Flags().StringArrayVar(&flags.ExtraArgs, "extra-args", flags.ExtraArgs, "Pass a single extra arg key-value pair to the component in the format `component=key=value`")
+
 	return cmd
+}
+
+func multiplyByFactor[T ~int64 | ~uint](num *T, factor float64) {
+	*num = T(float64(*num) * factor)
+}
+
+func mutationHeartbeat(flags *flagpole) {
+	if flags.Options.HeartbeatFactor == 0 || flags.Options.HeartbeatFactor == 1 {
+		return
+	}
+	multiplyByFactor(&flags.Options.NodeLeaseDurationSeconds, flags.Options.HeartbeatFactor)
+	multiplyByFactor(&flags.Options.NodeStatusUpdateFrequencyMilliseconds, flags.Options.HeartbeatFactor)
+	multiplyByFactor(&flags.Options.KubeControllerManagerNodeMonitorGracePeriodMilliseconds, flags.Options.HeartbeatFactor)
+	multiplyByFactor(&flags.Options.KubeControllerManagerNodeMonitorPeriodMilliseconds, flags.Options.HeartbeatFactor)
+	flags.Options.HeartbeatFactor = 1
+}
+
+func mutationComponentPatches(flags *flagpole) {
+	componentPatches := make([]internalversion.ComponentPatches, 0, len(flags.ExtraArgs))
+	componentNames := make(map[string]int)
+	for i, extraArgs := range flags.ExtraArgs {
+		splitedArgs := strings.SplitN(extraArgs, "=", 3)
+		if len(splitedArgs) != 3 {
+			continue
+		}
+		if n, ok := componentNames[splitedArgs[0]]; ok {
+			componentPatches[n].ExtraArgs = append(componentPatches[n].ExtraArgs, internalversion.ExtraArgs{
+				Key:   splitedArgs[1],
+				Value: splitedArgs[2],
+			})
+			continue
+		}
+		componentPatches = append(componentPatches, internalversion.ComponentPatches{
+			Name: splitedArgs[0],
+			ExtraArgs: []internalversion.ExtraArgs{
+				{
+					Key:   splitedArgs[1],
+					Value: splitedArgs[2],
+				},
+			},
+		})
+		componentNames[splitedArgs[0]] = i
+	}
+	flags.KwokctlConfiguration.ComponentsPatches = append(flags.KwokctlConfiguration.ComponentsPatches, componentPatches...)
 }
 
 func runE(ctx context.Context, flags *flagpole) error {
@@ -147,6 +221,9 @@ func runE(ctx context.Context, flags *flagpole) error {
 		ctx, cancel = context.WithTimeout(ctx, flags.Timeout)
 		defer cancel()
 	}
+
+	mutationHeartbeat(flags)
+	mutationComponentPatches(flags)
 
 	// Choose runtime
 	var rt runtime.Runtime
@@ -183,12 +260,15 @@ func runE(ctx context.Context, flags *flagpole) error {
 		if err != nil {
 			return fmt.Errorf("runtime %v not available: %w", flags.Options.Runtime, err)
 		}
+		err = rt.Available(ctx)
+		if err != nil {
+			return fmt.Errorf("runtime %v not available: %w", flags.Options.Runtime, err)
+		}
 	}
 
 	// Set up the cluster
 	_, err = rt.Config(ctx)
 	exist := err == nil
-	cleanUp := func() {}
 	if exist {
 		logger.Info("Cluster already exists")
 		if ready, err := rt.Ready(ctx); err == nil && ready {
@@ -197,7 +277,7 @@ func runE(ctx context.Context, flags *flagpole) error {
 		}
 		logger.Info("Cluster is not ready yet, continue it")
 	} else {
-		cleanUp = func() {
+		cleanUp := func() {
 			subCtx := context.Background()
 			err := rt.Uninstall(subCtx)
 			if err != nil {
@@ -218,17 +298,21 @@ func runE(ctx context.Context, flags *flagpole) error {
 			cleanUp()
 			return err
 		}
+
+		// Create the cluster
+		start := time.Now()
+		logger.Info("Cluster is creating")
+		err = rt.Install(ctx)
+		if err != nil {
+			logger.Error("Failed to setup config", err)
+			cleanUp()
+			return err
+		}
+		logger.Info("Cluster is created",
+			"elapsed", time.Since(start),
+		)
 	}
 
-	// Create the cluster
-	start := time.Now()
-	logger.Info("Cluster is creating")
-	err = rt.Install(ctx)
-	if err != nil {
-		logger.Error("Failed to setup config", err)
-		cleanUp()
-		return err
-	}
 	if flags.Kubeconfig != "" {
 		setContext := func() {
 			err = rt.AddContext(ctx, flags.Kubeconfig)
@@ -244,31 +328,36 @@ func runE(ctx context.Context, flags *flagpole) error {
 		}
 
 		if flags.Options.Runtime == consts.RuntimeTypeKind ||
-			flags.Options.Runtime == consts.RuntimeTypeKindPodman {
+			flags.Options.Runtime == consts.RuntimeTypeKindPodman ||
+			flags.Options.Runtime == consts.RuntimeTypeKindNerdctl ||
+			flags.Options.Runtime == consts.RuntimeTypeKindLima ||
+			flags.Options.Runtime == consts.RuntimeTypeKindFinch {
 			// override kubeconfig for kind
 			defer setContext()
 		} else {
 			setContext()
 		}
 	}
-	logger.Info("Cluster is created",
-		"elapsed", time.Since(start),
-	)
 
 	// Start the cluster
-	start = time.Now()
+	start := time.Now()
 	logger.Info("Cluster is starting")
 	err = rt.Up(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to start cluster %q: %w", name, err)
 	}
+	logger.Info("Cluster is started",
+		"elapsed", time.Since(start),
+	)
+
 	err = rt.InitCRDs(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to init crds %q: %w", name, err)
 	}
-	logger.Info("Cluster is started",
-		"elapsed", time.Since(start),
-	)
+	err = rt.InitCRs(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to init crs %q: %w", name, err)
+	}
 
 	// Wait for cluster to be ready
 	if flags.Wait > 0 {

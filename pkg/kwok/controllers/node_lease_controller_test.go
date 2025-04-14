@@ -31,9 +31,11 @@ import (
 
 	"sigs.k8s.io/kwok/pkg/log"
 	"sigs.k8s.io/kwok/pkg/utils/format"
+	"sigs.k8s.io/kwok/pkg/utils/informer"
 )
 
 func TestNodeLeaseController(t *testing.T) {
+	now := time.Now()
 	clientset := fake.NewSimpleClientset(
 		&coordinationv1.Lease{
 			ObjectMeta: metav1.ObjectMeta{
@@ -42,7 +44,7 @@ func TestNodeLeaseController(t *testing.T) {
 			},
 			Spec: coordinationv1.LeaseSpec{
 				HolderIdentity:       format.Ptr("lease1"),
-				RenewTime:            format.Ptr(metav1.NewMicroTime(time.Now().Add(-61 * time.Second))),
+				RenewTime:            format.Ptr(metav1.NewMicroTime(now.Add(-61 * time.Second))),
 				LeaseDurationSeconds: format.Ptr(int32(60)),
 			},
 		},
@@ -53,7 +55,7 @@ func TestNodeLeaseController(t *testing.T) {
 			},
 			Spec: coordinationv1.LeaseSpec{
 				HolderIdentity:       format.Ptr("lease2"),
-				RenewTime:            format.Ptr(metav1.NewMicroTime(time.Now())),
+				RenewTime:            format.Ptr(metav1.NewMicroTime(now)),
 				LeaseDurationSeconds: format.Ptr(int32(60)),
 			},
 		},
@@ -64,32 +66,44 @@ func TestNodeLeaseController(t *testing.T) {
 			},
 			Spec: coordinationv1.LeaseSpec{
 				HolderIdentity:       format.Ptr("lease3"),
-				RenewTime:            format.Ptr(metav1.NewMicroTime(time.Now().Add(-61 * time.Second))),
+				RenewTime:            format.Ptr(metav1.NewMicroTime(now.Add(-61 * time.Second))),
 				LeaseDurationSeconds: format.Ptr(int32(60)),
 			},
 		},
 	)
 
+	ctx := context.Background()
+	ctx = log.NewContext(ctx, log.NewLogger(os.Stderr, log.LevelDebug))
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	t.Cleanup(func() {
+		cancel()
+		time.Sleep(time.Second)
+	})
+
+	nodeLeasesCli := clientset.CoordinationV1().Leases(corev1.NamespaceNodeLease)
+	nodesInformer := informer.NewInformer[*coordinationv1.Lease, *coordinationv1.LeaseList](nodeLeasesCli)
+	cache, err := nodesInformer.WatchWithCache(ctx, informer.Option{}, nil)
+	if err != nil {
+		t.Fatal(fmt.Errorf("watch node leases error: %w", err))
+	}
+
 	nodeLeases, err := NewNodeLeaseController(NodeLeaseControllerConfig{
-		TypedClient:          clientset,
+		TypedClient: clientset,
+		GetLease: func(nodeName string) (*coordinationv1.Lease, bool) {
+			return cache.GetWithNamespace(nodeName, corev1.NamespaceNodeLease)
+		},
 		HolderIdentity:       "test",
 		LeaseDurationSeconds: 40,
 		LeaseParallelism:     2,
 		RenewInterval:        10 * time.Second,
 		RenewIntervalJitter:  0.04,
-		LeaseNamespace:       corev1.NamespaceNodeLease,
 	})
 	if err != nil {
 		t.Fatal(fmt.Errorf("new node leases controller error: %w", err))
 	}
 
-	ctx := context.Background()
-	ctx = log.NewContext(ctx, log.NewLogger(os.Stderr, log.LevelDebug))
-	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
-	t.Cleanup(func() {
-		cancel()
-		time.Sleep(time.Second)
-	})
+	time.Sleep(1 * time.Second)
+
 	err = nodeLeases.Start(ctx)
 	if err != nil {
 		t.Fatal(fmt.Errorf("start node leases controller error: %w", err))
@@ -99,45 +113,45 @@ func TestNodeLeaseController(t *testing.T) {
 	nodeLeases.TryHold("lease1")
 	nodeLeases.TryHold("lease2")
 
-	time.Sleep(2 * time.Second)
+	time.Sleep(1 * time.Second)
 
 	if !nodeLeases.Held("lease0") {
-		t.Fatal("lease0 not held")
+		t.Error("lease0 not held")
 	}
 
 	if !nodeLeases.Held("lease1") {
-		t.Fatal("lease1 not held")
+		t.Error("lease1 not held")
 	}
 
 	if nodeLeases.Held("lease2") {
-		t.Fatal("lease2 held")
+		t.Error("lease2 held")
 	}
 
 	if nodeLeases.Held("lease3") {
-		t.Fatal("lease3 held")
+		t.Error("lease3 held")
 	}
 
 	if nodeLeases.Held("lease4") {
-		t.Fatal("lease4 held")
+		t.Error("lease4 held")
 	}
 
 	_ = clientset.CoordinationV1().Leases(corev1.NamespaceNodeLease).Delete(ctx, "lease1", metav1.DeleteOptions{})
 	time.Sleep(2 * time.Second)
 
 	if !nodeLeases.Held("lease0") {
-		t.Fatal("lease0 not held")
+		t.Error("lease0 not held")
 	}
 
 	if nodeLeases.Held("lease1") {
-		t.Fatal("lease1 held")
+		t.Error("lease1 held")
 	}
 
 	if nodeLeases.Held("lease3") {
-		t.Fatal("lease3 held")
+		t.Error("lease3 held")
 	}
 
 	if nodeLeases.Held("lease4") {
-		t.Fatal("lease4 held")
+		t.Error("lease4 held")
 	}
 }
 
@@ -206,68 +220,97 @@ func Test_tryAcquireOrRenew(t *testing.T) {
 	}
 }
 
-func Test_nextTryTime(t *testing.T) {
-	now := time.Now()
-	type args struct {
-		lease          *coordinationv1.Lease
-		holderIdentity string
-		next           time.Time
-	}
+func TestNextTryDuration(t *testing.T) {
 	tests := []struct {
-		name string
-		args args
-		want time.Time
+		name           string
+		renewInterval  time.Duration
+		expire         time.Duration
+		hold           bool
+		expectedResult time.Duration
 	}{
 		{
-			name: "holder self and not expired",
-			args: args{
-				lease: &coordinationv1.Lease{
-					Spec: coordinationv1.LeaseSpec{
-						HolderIdentity:       format.Ptr("test"),
-						LeaseDurationSeconds: format.Ptr(int32(40)),
-						RenewTime:            format.Ptr(metav1.NewMicroTime(now)),
-					},
-				},
-				holderIdentity: "test",
-				next:           now.Add(39 * time.Second),
-			},
-			want: now.Add(39 * time.Second),
+			name:           "Lease not held",
+			renewInterval:  10 * time.Second,
+			expire:         5 * time.Second,
+			hold:           false,
+			expectedResult: 10 * time.Second,
 		},
 		{
-			name: "holder self and expired",
-			args: args{
-				lease: &coordinationv1.Lease{
-					Spec: coordinationv1.LeaseSpec{
-						HolderIdentity:       format.Ptr("test"),
-						LeaseDurationSeconds: format.Ptr(int32(40)),
-						RenewTime:            format.Ptr(metav1.NewMicroTime(now)),
-					},
-				},
-				holderIdentity: "test",
-				next:           now.Add(41 * time.Second),
-			},
-			want: now.Add(40 * time.Second),
+			name:           "Lease held, renew interval less than expire time",
+			renewInterval:  5 * time.Second,
+			expire:         10 * time.Second,
+			hold:           true,
+			expectedResult: 5 * time.Second,
 		},
 		{
-			name: "holder not self and not expired",
-			args: args{
-				lease: &coordinationv1.Lease{
-					Spec: coordinationv1.LeaseSpec{
-						HolderIdentity:       format.Ptr("test"),
-						LeaseDurationSeconds: format.Ptr(int32(40)),
-						RenewTime:            format.Ptr(metav1.NewMicroTime(now)),
-					},
-				},
-				holderIdentity: "test-new",
-				next:           now.Add(39 * time.Second),
-			},
-			want: now.Add(40 * time.Second),
+			name:           "Lease held, renew interval greater than expire time",
+			renewInterval:  10 * time.Second,
+			expire:         5 * time.Second,
+			hold:           true,
+			expectedResult: 5 * time.Second,
+		},
+		{
+			name:           "Lease held, expire time less than 1 second",
+			renewInterval:  10 * time.Second,
+			expire:         500 * time.Millisecond,
+			hold:           true,
+			expectedResult: 1 * time.Second,
+		},
+		{
+			name:           "Lease held, renew interval equals expire time",
+			renewInterval:  5 * time.Second,
+			expire:         5 * time.Second,
+			hold:           true,
+			expectedResult: 5 * time.Second,
 		},
 	}
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := nextTryTime(tt.args.lease, tt.args.holderIdentity, tt.args.next); !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("nextTryTime() = %v, want %v", got, tt.want)
+			result := nextTryDuration(tt.renewInterval, tt.expire, tt.hold)
+			if result != tt.expectedResult {
+				t.Errorf("nextTryDuration() = %v, want %v", result, tt.expectedResult)
+			}
+		})
+	}
+}
+
+func TestExpireTime(t *testing.T) {
+	now := time.Now()
+	tests := []struct {
+		name     string
+		lease    *coordinationv1.Lease
+		wantTime time.Time
+		wantBool bool
+	}{
+		{
+			name:     "Lease with missing fields",
+			lease:    &coordinationv1.Lease{},
+			wantTime: time.Time{},
+			wantBool: false,
+		},
+		{
+			name: "Lease with all fields",
+			lease: &coordinationv1.Lease{
+				Spec: coordinationv1.LeaseSpec{
+					HolderIdentity:       format.Ptr("test"),
+					LeaseDurationSeconds: format.Ptr(int32(10)),
+					RenewTime:            format.Ptr(metav1.NewMicroTime(now)),
+				},
+			},
+			wantTime: now.Add(10 * time.Second),
+			wantBool: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotTime, gotBool := expireTime(tt.lease)
+			if !reflect.DeepEqual(gotTime, tt.wantTime) {
+				t.Errorf("expireTime() gotTime = %v, want %v", gotTime, tt.wantTime)
+			}
+			if gotBool != tt.wantBool {
+				t.Errorf("expireTime() gotBool = %v, want %v", gotBool, tt.wantBool)
 			}
 		})
 	}

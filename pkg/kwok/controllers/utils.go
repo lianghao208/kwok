@@ -17,14 +17,24 @@ limitations under the License.
 package controllers
 
 import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"math"
 	"net"
 	"sync"
+	"time"
 
-	"github.com/wzshiming/cron"
+	jsonpatch "github.com/evanphx/json-patch/v5"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/types"
+	utilnet "k8s.io/apimachinery/pkg/util/net"
+	"k8s.io/apimachinery/pkg/util/strategicpatch"
 
-	"sigs.k8s.io/kwok/pkg/utils/maps"
+	"sigs.k8s.io/kwok/pkg/utils/lifecycle"
 	utilsnet "sigs.k8s.io/kwok/pkg/utils/net"
+	"sigs.k8s.io/kwok/pkg/utils/wait"
 )
 
 func parseCIDR(s string) (*net.IPNet, error) {
@@ -110,14 +120,185 @@ func labelsParse(selector string) (labels.Selector, error) {
 	return labels.Parse(selector)
 }
 
-type jobInfoMap = maps.SyncMap[string, jobInfo]
-
-type jobInfo struct {
-	ResourceVersion string
-	Cancel          cron.DoFunc
-}
-
 type resourceStageJob[T any] struct {
 	Resource T
-	Stage    *LifecycleStage
+	Stage    *lifecycle.Stage
+	Key      string
+	// RetryCount is used for tracking the retry times of a job.
+	// Must be initialized to 0.
+	RetryCount *uint64
+}
+
+// defaultBackoff provides a backoff setting for kwok controllers to apply failed jobs
+func defaultBackoff() wait.Backoff {
+	return wait.Backoff{Duration: 1 * time.Second, Factor: 2.0, Jitter: 0.2, Cap: 32 * time.Minute}
+}
+
+// backoffDelayByStep calculates the backoff delay period based on steps
+func backoffDelayByStep(steps uint64, c wait.Backoff) time.Duration {
+	delay := math.Min(
+		float64(c.Duration)*math.Pow(c.Factor, float64(steps)),
+		float64(c.Cap))
+	return wait.Jitter(time.Duration(delay), c.Jitter)
+}
+
+// shouldRetry determines if a certain error needs to be retried
+func shouldRetry(err error) bool {
+	// if apiserver is not reachable
+	if utilnet.IsConnectionRefused(err) {
+		return true
+	}
+	// if it is a network issue reported by apiserver side
+	if apierrors.IsServerTimeout(err) ||
+		apierrors.IsTimeout(err) ||
+		apierrors.IsServiceUnavailable(err) ||
+		apierrors.IsTooManyRequests(err) {
+		return true
+	}
+	// ignore all other cases
+	return false
+}
+
+func checkNeedPatchWithTyped[T any](obj T, patchData []byte, patchType types.PatchType) (bool, error) {
+	switch patchType {
+	case types.JSONPatchType:
+		return checkNeedJSONPatch(obj, patchData)
+	case types.StrategicMergePatchType:
+		return checkNeedStrategicMergePatchWithTyped(obj, patchData)
+	case types.MergePatchType:
+		return checkNeedMergePatchWithTyped(obj, patchData)
+	}
+	return false, fmt.Errorf("unknown patch type %s", patchType)
+}
+
+func checkNeedPatch(obj any, patchData []byte, patchType types.PatchType, schema strategicpatch.LookupPatchMeta) (bool, error) {
+	switch patchType {
+	case types.JSONPatchType:
+		return checkNeedJSONPatch(obj, patchData)
+	case types.StrategicMergePatchType:
+		return checkNeedStrategicMergePatchWithMeta(obj, patchData, schema)
+	case types.MergePatchType:
+		return checkNeedMergePatch(obj, patchData)
+	}
+	return false, fmt.Errorf("unknown patch type %s", patchType)
+}
+
+// checkNeedStrategicMergePatchWithTyped checks if the object needs to be patched
+func checkNeedStrategicMergePatchWithTyped[T any](obj T, patchData []byte) (bool, error) {
+	original, err := json.Marshal(obj)
+	if err != nil {
+		return false, err
+	}
+
+	sum, err := strategicpatch.StrategicMergePatch(original, patchData, obj)
+	if err != nil {
+		return false, err
+	}
+
+	var tmp T
+	err = json.Unmarshal(sum, &tmp)
+	if err != nil {
+		return false, err
+	}
+
+	dist, err := json.Marshal(tmp)
+	if err != nil {
+		return false, err
+	}
+
+	if bytes.Equal(original, dist) {
+		return false, nil
+	}
+
+	return true, nil
+}
+
+// checkNeedMergePatchWithTyped checks if the object needs to be patched
+func checkNeedMergePatchWithTyped[T any](obj T, patchData []byte) (bool, error) {
+	original, err := json.Marshal(obj)
+	if err != nil {
+		return false, err
+	}
+
+	sum, err := jsonpatch.MergePatch(original, patchData)
+	if err != nil {
+		return false, err
+	}
+
+	var tmp T
+	err = json.Unmarshal(sum, &tmp)
+	if err != nil {
+		return false, err
+	}
+
+	dist, err := json.Marshal(tmp)
+	if err != nil {
+		return false, err
+	}
+
+	if bytes.Equal(original, dist) {
+		return false, nil
+	}
+
+	return true, nil
+}
+
+// checkNeedJSONPatch checks if the object needs to be patched
+func checkNeedJSONPatch(obj any, patchData []byte) (bool, error) {
+	original, err := json.Marshal(obj)
+	if err != nil {
+		return false, err
+	}
+
+	patch, err := jsonpatch.DecodePatch(patchData)
+	if err != nil {
+		return false, err
+	}
+
+	sum, err := patch.Apply(original)
+	if err != nil {
+		return false, err
+	}
+
+	if bytes.Equal(original, sum) {
+		return false, nil
+	}
+
+	return true, nil
+}
+
+func checkNeedStrategicMergePatchWithMeta(obj any, patchData []byte, schema strategicpatch.LookupPatchMeta) (bool, error) {
+	original, err := json.Marshal(obj)
+	if err != nil {
+		return false, err
+	}
+
+	sum, err := strategicpatch.StrategicMergePatchUsingLookupPatchMeta(original, patchData, schema)
+	if err != nil {
+		return false, err
+	}
+
+	if bytes.Equal(sum, original) {
+		return false, nil
+	}
+
+	return true, nil
+}
+
+func checkNeedMergePatch(obj any, patchData []byte) (bool, error) {
+	original, err := json.Marshal(obj)
+	if err != nil {
+		return false, err
+	}
+
+	sum, err := jsonpatch.MergePatch(original, patchData)
+	if err != nil {
+		return false, err
+	}
+
+	if bytes.Equal(sum, original) {
+		return false, nil
+	}
+
+	return true, nil
 }

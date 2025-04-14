@@ -29,6 +29,7 @@ const (
 // +genclient
 // +kubebuilder:subresource:status
 // +kubebuilder:rbac:groups=kwok.x-k8s.io,resources=logs,verbs=create;delete;get;list;patch;update;watch
+// +kubebuilder:rbac:groups=kwok.x-k8s.io,resources=logs/status,verbs=update;patch
 
 // Logs provides logging configuration for a single pod.
 type Logs struct {
@@ -63,13 +64,13 @@ type LogsSpec struct {
 // Log holds information how to forward logs.
 type Log struct {
 	// Containers is list of container names.
-	Containers []string `json:"containers"`
+	Containers []string `json:"containers,omitempty"`
 	// LogsFile is the file from which the log forward starts
-	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:MinLength=1
-	LogsFile string `json:"logsFile"`
+	LogsFile *string `json:"logsFile,omitempty"`
+	// PreviousLogsFile is the file containing previous container logs
+	PreviousLogsFile *string `json:"previousLogsFile,omitempty"`
 	// Follow up if true
-	Follow bool `json:"follow"`
+	Follow *bool `json:"follow,omitempty"`
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object

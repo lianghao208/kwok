@@ -25,6 +25,20 @@ func Map[S ~[]T, T any, O any](s S, f func(T) O) []O {
 	return out
 }
 
+// MapWithError returns a new slice containing the results of applying the given function
+// to all elements in the slice that satisfy the predicate f.
+func MapWithError[S ~[]T, T any, O any](s S, f func(T) (O, error)) ([]O, error) {
+	out := make([]O, len(s))
+	for i := range s {
+		o, err := f(s[i])
+		if err != nil {
+			return nil, err
+		}
+		out[i] = o
+	}
+	return out, nil
+}
+
 // Find returns the first element in the slice that satisfies the predicate f.
 func Find[S ~[]T, T any](s S, f func(T) bool) (t T, ok bool) {
 	for _, v := range s {
@@ -102,6 +116,16 @@ func Reverse[S ~[]T, T any](s S) []T {
 	out := make([]T, len(s))
 	for i := range s {
 		out[len(s)-1-i] = s[i]
+	}
+	return out
+}
+
+// GroupBy returns a map of slices grouped by the given function.
+func GroupBy[S ~[]T, T any, K comparable](s S, f func(T) K) map[K][]T {
+	out := make(map[K][]T)
+	for _, v := range s {
+		k := f(v)
+		out[k] = append(out[k], v)
 	}
 	return out
 }

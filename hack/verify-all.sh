@@ -43,6 +43,13 @@ if [[ "${VERIFY_GO_FORMAT:-true}" == "true" ]]; then
   "${ROOT_DIR}"/hack/verify-go-format.sh || failed+=(go-format)
 fi
 
+# TODO: Switch on after a while
+# https://github.com/golangci/golangci-lint/issues/4909
+if [[ "${VERIFY_GO_LINT:-false}" == "true" ]]; then
+  echo "[*] Verifying go lint..."
+  "${ROOT_DIR}"/hack/verify-go-lint.sh || failed+=(go-lint)
+fi
+
 if [[ "${VERIFY_CODEGEN:-true}" == "true" ]]; then
   echo "[*] Verifying codegen..."
   "${ROOT_DIR}"/hack/verify-codegen.sh || failed+=(codegen)
@@ -78,9 +85,34 @@ if [[ "${VERIFY_SHELL_FORMAT:-true}" == "true" ]]; then
   "${ROOT_DIR}"/hack/verify-shell-format.sh || failed+=(shell-format)
 fi
 
+if [[ "${VERIFY_YAML_FORMAT:-true}" == "true" ]]; then
+  echo "[*] Verifying yaml format..."
+  "${ROOT_DIR}"/hack/verify-yaml-format.sh || failed+=(yaml-format)
+fi
+
 if [[ "${VERIFY_SPELLING:-true}" == "true" ]]; then
   echo "[*] Verifying spelling..."
   "${ROOT_DIR}"/hack/verify-spelling.sh || failed+=(spelling)
+fi
+
+if [[ "${VERIFY_STAGES:-true}" == "true" ]]; then
+  echo "[*] Verifying stages..."
+  "${ROOT_DIR}"/hack/verify-stages.sh || failed+=(stages)
+fi
+
+if [[ "${VERIFY_HELM_CHARTS:-true}" == "true" ]]; then
+  echo "[*] Verifying helm charts..."
+  "${ROOT_DIR}"/hack/verify-helm-charts.sh || failed+=(helm-charts)
+fi
+
+if [[ "${VERIFY_DEPENDENCIES_VERSION:-true}" == "true" ]]; then
+  echo "[*] Verifying dependencies version..."
+  "${ROOT_DIR}"/hack/verify-dependencies-version.sh || failed+=(dependencies-version)
+fi
+
+if [[ "${VERIFY_DRY_RUN_TESTDATA:-true}" == "true" ]]; then
+  echo "[*] Verifying testdata..."
+  "${ROOT_DIR}"/hack/verify-testdata.sh || failed+=(testdata)
 fi
 
 # exit based on verify scripts

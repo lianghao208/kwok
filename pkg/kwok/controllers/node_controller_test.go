@@ -20,7 +20,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"strings"
 	"testing"
 	"time"
 
@@ -29,10 +28,14 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 
+	nodefast "sigs.k8s.io/kwok/kustomize/stage/node/fast"
+	"sigs.k8s.io/kwok/pkg/apis/internalversion"
+	"sigs.k8s.io/kwok/pkg/config"
 	"sigs.k8s.io/kwok/pkg/config/resources"
 	"sigs.k8s.io/kwok/pkg/log"
+	"sigs.k8s.io/kwok/pkg/utils/informer"
+	"sigs.k8s.io/kwok/pkg/utils/lifecycle"
 	"sigs.k8s.io/kwok/pkg/utils/wait"
-	"sigs.k8s.io/kwok/stages"
 )
 
 func TestNodeController(t *testing.T) {
@@ -40,6 +43,9 @@ func TestNodeController(t *testing.T) {
 		&corev1.Node{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: "node0",
+				Annotations: map[string]string{
+					"node": "true",
+				},
 			},
 			Status: corev1.NodeStatus{
 				Addresses: []corev1.NodeAddress{
@@ -67,18 +73,17 @@ func TestNodeController(t *testing.T) {
 	)
 
 	nodeSelectorFunc := func(node *corev1.Node) bool {
-		return strings.HasPrefix(node.Name, "node")
+		return node.Annotations["node"] == "true"
 	}
-	nodeStages, _ := NewStagesFromYaml([]byte(stages.DefaultNodeStages))
-	nodeHeartbeatStages, _ := NewStagesFromYaml([]byte(stages.DefaultNodeHeartbeatStages))
-	nodeStages = append(nodeStages, nodeHeartbeatStages...)
-	lifecycle, _ := NewLifecycle(nodeStages)
+
+	nodeInit, _ := config.UnmarshalWithType[*internalversion.Stage](nodefast.DefaultNodeInit)
+	nodeStages := []*internalversion.Stage{nodeInit}
+
+	lc, _ := lifecycle.NewLifecycle(nodeStages)
 	nodes, err := NewNodeController(NodeControllerConfig{
 		TypedClient:          clientset,
 		NodeIP:               "10.0.0.1",
-		NodeSelectorFunc:     nodeSelectorFunc,
-		Lifecycle:            resources.NewStaticGetter(lifecycle),
-		FuncMap:              defaultFuncMap,
+		Lifecycle:            resources.NewStaticGetter(lc),
 		PlayStageParallelism: 2,
 	})
 	if err != nil {
@@ -86,13 +91,23 @@ func TestNodeController(t *testing.T) {
 	}
 	ctx := context.Background()
 	ctx = log.NewContext(ctx, log.NewLogger(os.Stderr, log.LevelDebug))
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	t.Cleanup(func() {
 		cancel()
 		time.Sleep(time.Second)
 	})
 
-	err = nodes.Start(ctx)
+	nodeCh := make(chan informer.Event[*corev1.Node], 1)
+	nodesCli := clientset.CoreV1().Nodes()
+	nodesInformer := informer.NewInformer[*corev1.Node, *corev1.NodeList](nodesCli)
+	err = nodesInformer.Watch(ctx, informer.Option{
+		AnnotationSelector: "node=true",
+	}, nodeCh)
+	if err != nil {
+		t.Fatal(fmt.Errorf("failed to watch nodes: %w", err))
+	}
+
+	err = nodes.Start(ctx, nodeCh)
 	if err != nil {
 		t.Fatal(fmt.Errorf("failed to start nodes controller: %w", err))
 	}
@@ -118,17 +133,6 @@ func TestNodeController(t *testing.T) {
 	_, err = clientset.CoreV1().Nodes().Create(ctx, node1, metav1.CreateOptions{})
 	if err != nil {
 		t.Fatal(fmt.Errorf("failed to create node1: %w", err))
-	}
-
-	err = wait.Poll(ctx, func(ctx context.Context) (done bool, err error) {
-		nodeSize := nodes.Size()
-		if nodeSize != 2 {
-			return false, fmt.Errorf("want 2 nodes, got %d", nodeSize)
-		}
-		return true, nil
-	}, wait.WithContinueOnError(5))
-	if err != nil {
-		t.Fatal(err)
 	}
 
 	node1, err = clientset.CoreV1().Nodes().Get(ctx, "node1", metav1.GetOptions{})

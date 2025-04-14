@@ -17,56 +17,61 @@ limitations under the License.
 package components
 
 import (
+	"fmt"
 	"runtime"
+	"strconv"
+
+	"k8s.io/apimachinery/pkg/api/resource"
 
 	"sigs.k8s.io/kwok/pkg/apis/internalversion"
+	"sigs.k8s.io/kwok/pkg/consts"
 	"sigs.k8s.io/kwok/pkg/log"
 	"sigs.k8s.io/kwok/pkg/utils/format"
+	"sigs.k8s.io/kwok/pkg/utils/net"
 	"sigs.k8s.io/kwok/pkg/utils/version"
 )
 
 // BuildEtcdComponentConfig is the configuration for building an etcd component.
 type BuildEtcdComponentConfig struct {
-	Binary       string
-	Image        string
-	Version      version.Version
-	DataPath     string
-	Workdir      string
-	BindAddress  string
-	Port         uint32
-	PeerPort     uint32
-	Verbosity    log.Level
-	ExtraArgs    []internalversion.ExtraArgs
-	ExtraVolumes []internalversion.Volume
-	ExtraEnvs    []internalversion.Env
+	Runtime          string
+	Binary           string
+	Image            string
+	ProjectName      string
+	Version          version.Version
+	DataPath         string
+	Workdir          string
+	BindAddress      string
+	Port             uint32
+	PeerPort         uint32
+	Verbosity        log.Level
+	QuotaBackendSize string
+	OtlpGrpcAddress  string
 }
 
 // BuildEtcdComponent builds an etcd component.
 func BuildEtcdComponent(conf BuildEtcdComponentConfig) (component internalversion.Component, err error) {
-	exposePeerPort := true
-	if conf.PeerPort == 0 {
-		conf.PeerPort = 2380
-		exposePeerPort = false
-	}
-	exposePort := true
-	if conf.Port == 0 {
-		conf.Port = 2379
-		exposePort = false
+	var volumes []internalversion.Volume
+	var ports []internalversion.Port
+
+	quantity, err := resource.ParseQuantity(conf.QuotaBackendSize)
+	if err != nil {
+		return internalversion.Component{}, err
 	}
 
-	var volumes []internalversion.Volume
-	volumes = append(volumes, conf.ExtraVolumes...)
-	var ports []internalversion.Port
+	quotaBackendSize, ok := quantity.AsInt64()
+	if !ok {
+		return internalversion.Component{}, fmt.Errorf("failed to convert quota backend size to int64")
+	}
 
 	etcdArgs := []string{
 		"--name=node0",
 		"--auto-compaction-retention=1",
-		"--quota-backend-bytes=8589934592",
+		"--quota-backend-bytes=" + strconv.FormatInt(quotaBackendSize, 10),
 	}
-	etcdArgs = append(etcdArgs, extraArgsToStrings(conf.ExtraArgs)...)
 
-	inContainer := conf.Image != ""
-	if inContainer {
+	var metric *internalversion.ComponentMetric
+
+	if GetRuntimeMode(conf.Runtime) != RuntimeModeNative {
 		// TODO: use a volume for the data path
 		// volumes = append(volumes,
 		//	internalversion.Volume{
@@ -78,24 +83,21 @@ func BuildEtcdComponent(conf BuildEtcdComponentConfig) (component internalversio
 			"--data-dir=/etcd-data",
 		)
 
-		if exposePeerPort {
-			ports = append(
-				ports,
-				internalversion.Port{
-					HostPort: conf.PeerPort,
-					Port:     2380,
-				},
-			)
-		}
-		if exposePort {
-			ports = append(
-				ports,
-				internalversion.Port{
-					HostPort: conf.Port,
-					Port:     2379,
-				},
-			)
-		}
+		ports = append(
+			ports,
+			internalversion.Port{
+				Name:     "peer-http",
+				HostPort: conf.PeerPort,
+				Port:     2380,
+				Protocol: internalversion.ProtocolTCP,
+			},
+			internalversion.Port{
+				Name:     "http",
+				HostPort: conf.Port,
+				Port:     2379,
+				Protocol: internalversion.ProtocolTCP,
+			},
+		)
 		etcdArgs = append(etcdArgs,
 			"--initial-advertise-peer-urls=http://"+conf.BindAddress+":2380",
 			"--listen-peer-urls=http://"+conf.BindAddress+":2380",
@@ -103,9 +105,32 @@ func BuildEtcdComponent(conf BuildEtcdComponentConfig) (component internalversio
 			"--listen-client-urls=http://"+conf.BindAddress+":2379",
 			"--initial-cluster=node0=http://"+conf.BindAddress+":2380",
 		)
+
+		metric = &internalversion.ComponentMetric{
+			Scheme: "http",
+			Host:   conf.ProjectName + "-" + consts.ComponentEtcd + ":2379",
+			Path:   "/metrics",
+		}
 	} else {
 		etcdPeerPortStr := format.String(conf.PeerPort)
 		etcdClientPortStr := format.String(conf.Port)
+
+		ports = append(
+			ports,
+			internalversion.Port{
+				Name:     "peer-http",
+				HostPort: 0,
+				Port:     conf.PeerPort,
+				Protocol: internalversion.ProtocolTCP,
+			},
+			internalversion.Port{
+				Name:     "http",
+				HostPort: 0,
+				Port:     conf.Port,
+				Protocol: internalversion.ProtocolTCP,
+			},
+		)
+
 		etcdArgs = append(etcdArgs,
 			"--data-dir="+conf.DataPath,
 			"--initial-advertise-peer-urls=http://"+conf.BindAddress+":"+etcdPeerPortStr,
@@ -114,6 +139,12 @@ func BuildEtcdComponent(conf BuildEtcdComponentConfig) (component internalversio
 			"--listen-client-urls=http://"+conf.BindAddress+":"+etcdClientPortStr,
 			"--initial-cluster=node0=http://"+conf.BindAddress+":"+etcdPeerPortStr,
 		)
+
+		metric = &internalversion.ComponentMetric{
+			Scheme: "http",
+			Host:   net.LocalAddress + ":" + etcdClientPortStr,
+			Path:   "/metrics",
+		}
 	}
 
 	if conf.Version.GTE(version.NewVersion(3, 4, 0)) {
@@ -126,6 +157,14 @@ func BuildEtcdComponent(conf BuildEtcdComponentConfig) (component internalversio
 		}
 	}
 
+	if conf.OtlpGrpcAddress != "" {
+		etcdArgs = append(etcdArgs,
+			"--experimental-enable-distributed-tracing=true",
+			"--experimental-distributed-tracing-address="+conf.OtlpGrpcAddress,
+			"--experimental-distributed-tracing-sampling-rate=1000000",
+		)
+	}
+
 	envs := []internalversion.Env{}
 	if runtime.GOARCH != "amd64" {
 		envs = append(envs, internalversion.Env{
@@ -133,16 +172,16 @@ func BuildEtcdComponent(conf BuildEtcdComponentConfig) (component internalversio
 			Value: runtime.GOARCH,
 		})
 	}
-	envs = append(envs, conf.ExtraEnvs...)
 
 	return internalversion.Component{
-		Name:    "etcd",
+		Name:    consts.ComponentEtcd,
 		Version: conf.Version.String(),
 		Volumes: volumes,
-		Command: []string{"etcd"},
+		Command: []string{consts.ComponentEtcd},
 		Args:    etcdArgs,
 		Binary:  conf.Binary,
 		Ports:   ports,
+		Metric:  metric,
 		Image:   conf.Image,
 		WorkDir: conf.Workdir,
 		Envs:    envs,

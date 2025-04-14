@@ -20,60 +20,113 @@ import (
 	"errors"
 	"io"
 
-	yamlv3 "gopkg.in/yaml.v3"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
-	"sigs.k8s.io/yaml"
+	"k8s.io/apimachinery/pkg/util/yaml" //nolint:depguard
+
+	"sigs.k8s.io/kwok/pkg/utils/slices"
 )
 
 // Decoder is a YAML decoder.
 type Decoder struct {
-	decoder *yamlv3.Decoder
+	decoder      *yaml.YAMLToJSONDecoder
+	errorHandler func(error) error
+	buf          []*unstructured.Unstructured
+}
+
+// WithErrorHandler sets the error handler for the decoder.
+func (d *Decoder) WithErrorHandler(handler func(error) error) *Decoder {
+	d.errorHandler = handler
+	return d
 }
 
 // NewDecoder returns a new YAML decoder.
 func NewDecoder(r io.Reader) *Decoder {
 	return &Decoder{
-		decoder: yamlv3.NewDecoder(r),
+		decoder: yaml.NewYAMLToJSONDecoder(r),
 	}
 }
 
-// Decode decodes YAML into a list of unstructured objects.
-func (d *Decoder) Decode(visitFunc func(obj *unstructured.Unstructured) error) error {
-	var tmp map[string]interface{}
+// Decode decodes YAML into an object.
+func (d *Decoder) Decode(obj any) error {
+	return d.decoder.Decode(obj)
+}
+
+// UndecodedUnstructured put a decoded unstructured object back to the decoder.
+func (d *Decoder) UndecodedUnstructured(obj *unstructured.Unstructured) {
+	d.buf = append(d.buf, obj)
+}
+
+// DecodeUnstructured decodes YAML into an unstructured object.
+func (d *Decoder) DecodeUnstructured() (*unstructured.Unstructured, error) {
+	if len(d.buf) != 0 {
+		last := len(d.buf) - 1
+		obj := d.buf[last]
+		d.buf = d.buf[:last]
+		return obj, nil
+	}
+
+	obj := &unstructured.Unstructured{}
+	err := d.Decode(obj)
+	if err != nil {
+		return nil, err
+	}
+
+	if obj.IsList() {
+		_ = obj.EachListItem(func(object runtime.Object) error {
+			obj := object.(*unstructured.Unstructured)
+			if len(obj.Object) == 0 {
+				return nil
+			}
+			d.buf = append(d.buf, object.(*unstructured.Unstructured))
+			return nil
+		})
+		// Reverse the slice to keep the order.
+		slices.Reverse(d.buf)
+		return d.DecodeUnstructured()
+	}
+
+	// If the object is empty, we should continue to decode the next object.
+	if len(obj.Object) == 0 {
+		return d.DecodeUnstructured()
+	}
+
+	return obj, nil
+}
+
+// DecodeToUnstructured decodes YAML into a list of unstructured objects.
+func (d *Decoder) DecodeToUnstructured(visitFunc func(obj *unstructured.Unstructured) error) error {
 	for {
-		err := d.decoder.Decode(&tmp)
+		obj := &unstructured.Unstructured{}
+		err := d.Decode(obj)
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				return nil
 			}
-			return err
-		}
-		if len(tmp) == 0 {
-			continue
-		}
-		data, err := yamlv3.Marshal(tmp)
-		if err != nil {
-			return err
-		}
-		data, err = yaml.YAMLToJSON(data)
-		if err != nil {
-			return err
-		}
-		obj := &unstructured.Unstructured{}
-		err = obj.UnmarshalJSON(data)
-		if err != nil {
+			if d.errorHandler != nil {
+				err = d.errorHandler(err)
+				if err == nil {
+					continue
+				}
+			}
 			return err
 		}
 
 		if obj.IsList() {
 			err = obj.EachListItem(func(object runtime.Object) error {
+				obj := object.(*unstructured.Unstructured)
+				if len(obj.Object) == 0 {
+					return nil
+				}
 				return visitFunc(object.(*unstructured.Unstructured))
 			})
 			if err != nil {
 				return err
 			}
 		} else {
+			if len(obj.Object) == 0 {
+				continue
+			}
 			err = visitFunc(obj)
 			if err != nil {
 				return err

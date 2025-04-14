@@ -14,16 +14,18 @@ spec:
       operator: 'In'
       values:
       - 'Pending'
-    - key: '.status.conditions.[] | select( .type == "Initialized" ) | .status'
-      operator: 'NotIn'
-      values:
-      - 'True'
     - key: '.status.initContainerStatuses.[].state.running.startedAt'
       operator: 'Exists'
   weight: 1
+  weightFrom:
+    expressionFrom: '.metadata.annotations["pod-init-container-completed.stage.kwok.x-k8s.io/weight"]'
   delay:
     durationMilliseconds: 1000
+    durationFrom:
+      expressionFrom: '.metadata.annotations["pod-init-container-completed.stage.kwok.x-k8s.io/delay"]'
     jitterDurationMilliseconds: 5000
+    jitterDurationFrom:
+      expressionFrom: '.metadata.annotations["pod-init-container-completed.stage.kwok.x-k8s.io/jitter-delay"]'
   next:
     statusTemplate: |
       {{ $now := Now }}
@@ -32,6 +34,7 @@ spec:
       - lastProbeTime: null
         lastTransitionTime: {{ $now | Quote }}
         status: "True"
+        reason: ""
         type: Initialized
       initContainerStatuses:
       {{ range $index, $item := .spec.initContainers }}

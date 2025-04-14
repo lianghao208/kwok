@@ -40,7 +40,7 @@ type flagpole struct {
 	Filters []string
 }
 
-// NewCommand returns a new cobra.Command to save the cluster as a snapshot.
+// NewCommand returns a new cobra.Command to restore the cluster as a snapshot.
 func NewCommand(ctx context.Context) *cobra.Command {
 	flags := &flagpole{}
 
@@ -76,7 +76,7 @@ func runE(ctx context.Context, flags *flagpole) error {
 	rt, err := runtime.DefaultRegistry.Load(ctx, name, workdir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			logger.Warn("Cluster is not exists")
+			logger.Warn("Cluster does not exist")
 		}
 		return err
 	}
@@ -88,7 +88,9 @@ func runE(ctx context.Context, flags *flagpole) error {
 			return err
 		}
 	case "k8s":
-		err = rt.SnapshotRestoreWithYAML(ctx, flags.Path, flags.Filters)
+		err = rt.SnapshotRestoreWithYAML(ctx, flags.Path, runtime.SnapshotRestoreWithYAMLConfig{
+			Filters: flags.Filters,
+		})
 		if err != nil {
 			return err
 		}

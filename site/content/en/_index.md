@@ -28,7 +28,9 @@ which means that simulating a large number of nodes and pods requires a lot of m
 
 ### What's the difference with `kind`
 
-[kind] runs Kubernetes in Docker, creating a real cluster.
+[kind] runs Kubernetes in Docker, creating a real cluster. If you deploy a nginx pod to a 
+[kind] cluster, you could curl to its IP address and get an HTTP response containing its HTML
+page. But in a KWOK cluster, you get nothing because the pod isn't real.
 
 `kwokctl` can be used as an alternative to [kind] in some scenarios where you don’t need to actually run any pod.
 
@@ -55,22 +57,26 @@ and [contribution to KWOK][contributor guide].
 
 Runtime indicates which medium `kwokctl` will use to start the cluster
 
-|    OS/Arch    | binary | docker | podman | nerdctl | kind  | kind-podman |
-|:-------------:|:------:|:------:|:------:|:-------:|:-----:|:-----------:|
-|  linux/amd64  |   🟢   |   🟢   |   🟢   |   🟢    |  🟢   |     🟢      |
-|  linux/arm64  |   🔵   |   🔵   |   🔵   |   🔵    |  🔵   |     🔵      |
-| darwin/amd64  | 🟢/🟠  |   🟢   |   🔵   |  🔵/🟡  |  🟢   |     🔵      |
-| darwin/arm64  | 🔵/🟠  |   🔵   |   🔵   |  🔵/🟡  |  🔵   |     🔵      |
-| windows/amd64 | 🟢/🟠  |   🟣   |   🟤   |  🟤/🟡  |  🟤   |     🟤      |
-| windows/arm64 | 🟣/🟠  |   🟣   |   🔴   |   🔴    |  🔴   |     🔴      |
+|              \              | linux/<br/>amd64 | linux/<br/>arm64 | darwin/<br/>amd64 | darwin/<br/>arm64 | windows/<br/>amd64 | windows/<br/>arm64  |
+|:---------------------------:|:----------------:|:----------------:|:-----------------:|:-----------------:|:------------------:|:-------------------:|
+| [binary][binary-runtime] ⭐️ |        🟢        |        🔵        |        🟢         |        🟢         |         🟢         |         🟣          |
+| [docker][docker-runtime] ⭐️ |        🟢        |        🔵        |        🔵         |        🔵         |         🟣         |         🟣          |
+| [podman][podman-runtime] ⭐️ |        🟢        |        🔵        |        🔵         |        🔵         |         🟣         |         🟣          |
+| [nerdctl][nerdctl-runtime]  |        🟢        |        🔵        |        🔴         |        🔴         |         🔴         |         🔴          |
+|   [lima][lima-runtime] ⚠️   |        🟣        |        🟣        |        🟣         |        🟣         |         🔴         |         🔴          |
+|  [finch][finch-runtime] ⚠️  |        🔴        |        🔴        |        🟣         |        🟣         |         🟣         |         🟣          |
+|    [kind][kind-runtime]     |        🟢        |        🔵        |        🔵         |        🔵         |         🟣         |         🟣          |
+|       **kind-podman**       |        🟢        |        🔵        |        🔵         |        🔵         |         🟣         |         🟣          |
+|     **kind-nerdctl** ⚠️     |        🟣        |        🟣        |        🔴         |        🔴         |         🔴         |         🔴          |
+|      **kind-lima** ⚠️       |        🟣        |        🟣        |        🟣         |        🟣         |         🔴         |         🔴          |
+|      **kind-finch** ⚠️      |        🔴        |        🔴        |        🟣         |        🟣         |         🟣         |         🟣          |
 
+- ⭐️ Recommended
+- ⚠️ Work in progress
 - 🟢 Supported and test covered by CI
 - 🔵 Supported and test by manually
-- 🟣 Supported but not test yet (need help to verify)
-- 🟤 Unsupported but should work in theory (need help to verify)
-- 🔴 Unsupported and will not work
-- 🟠 Need to build [platform-specific Kubernetes binaries]
-- 🟡 Need to do some workaround to make it work
+- 🟣 Supported but not fully tested
+- 🔴 Unsupported yet
 
 ## Community
 
@@ -101,3 +107,11 @@ Participation in the Kubernetes community is governed by the [Kubernetes Code of
 [run it using pre-built images]: {{< relref "/docs/user/all-in-one-image" >}}
 [simulate thousands of nodes]: {{< relref "/docs/user/kwok-manage-nodes-and-pods" >}}
 [platform-specific Kubernetes binaries]: {{< relref "/docs/user/kwokctl-platform-specific-binaries" >}}
+
+[binary-runtime]: https://kwok.sigs.k8s.io/docs/user/kwokctl-platform-specific-binaries/
+[docker-runtime]: https://docs.docker.com/get-docker/
+[podman-runtime]: https://podman.io/docs/installation
+[nerdctl-runtime]: https://github.com/containerd/nerdctl/releases
+[lima-runtime]: https://lima-vm.io/docs/installation/
+[finch-runtime]: https://runfinch.com/docs/getting-started/installation/
+[kind-runtime]: https://kind.sigs.k8s.io/docs/user/quick-start/

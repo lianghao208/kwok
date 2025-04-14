@@ -20,8 +20,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
-
-	"sigs.k8s.io/kwok/pkg/kwok/controllers"
 )
 
 // InstallServiceDiscovery installs the service discovery handler.
@@ -39,21 +37,21 @@ func (s *Server) prometheusDiscovery(rw http.ResponseWriter, req *http.Request) 
 
 	hosts := []string{req.Host}
 
-	var listNode []*controllers.NodeInfo
+	var listNode []string
 
 	metrics := s.metrics.Get()
 	for _, m := range metrics {
 		if strings.Contains(m.Spec.Path, "{nodeName}") {
 			if listNode == nil {
-				listNode = s.controller.ListNodes()
+				listNode = s.dataSource.ListNodes()
 			}
-			for _, node := range listNode {
+			for _, nodeName := range listNode {
 				targets = append(targets, prometheusStaticConfig{
 					Targets: hosts,
 					Labels: map[string]string{
 						"metrics_name":     m.Name,
 						"__scheme__":       scheme,
-						"__metrics_path__": strings.ReplaceAll(m.Spec.Path, "{nodeName}", node.Node.Name),
+						"__metrics_path__": strings.ReplaceAll(m.Spec.Path, "{nodeName}", nodeName),
 					},
 				})
 			}

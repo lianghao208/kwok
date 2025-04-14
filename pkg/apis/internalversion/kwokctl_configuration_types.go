@@ -47,6 +47,8 @@ type ExtraArgs struct {
 	Key string
 	// Value is the value of the extra args.
 	Value string
+	// Override is the value of is it override the arg
+	Override bool
 }
 
 // ComponentPatches holds information about the component patches.
@@ -63,8 +65,18 @@ type ComponentPatches struct {
 
 // KwokctlConfigurationOptions holds information about the options.
 type KwokctlConfigurationOptions struct {
+	// EnableCRDs is a list of CRDs to enable.
+	EnableCRDs []string
+
 	// KubeApiserverPort is the port to expose apiserver.
 	KubeApiserverPort uint32
+
+	// KubeApiserverInsecurePort is the port to expose kubectl proxy.
+	KubeApiserverInsecurePort uint32
+
+	// InsecureKubeconfig is the flag to use insecure kubeconfig.
+	// only available when KubeApiserverInsecurePort is set.
+	InsecureKubeconfig bool
 
 	// Runtime is the runtime to use.
 	Runtime string
@@ -77,6 +89,12 @@ type KwokctlConfigurationOptions struct {
 	// PrometheusPort is the port to expose Prometheus metrics.
 	PrometheusPort uint32
 
+	// JaegerPort is the port to expose Jaeger UI.
+	JaegerPort uint32
+
+	// JaegerOtlpGrpcPort is the port to expose OTLP GRPC collector.
+	JaegerOtlpGrpcPort uint32
+
 	// KwokVersion is the version of Kwok to use.
 	KwokVersion string
 
@@ -86,11 +104,20 @@ type KwokctlConfigurationOptions struct {
 	// EtcdVersion is the version of Etcd to use.
 	EtcdVersion string
 
+	// DashboardVersion is the version of Kubernetes dashboard to use.
+	DashboardVersion string
+
+	// DashboardMetricsScraperVersion is the version of dashboard metrics scraper to use.
+	DashboardMetricsScraperVersion string
+
 	// PrometheusVersion is the version of Prometheus to use.
 	PrometheusVersion string
 
-	// DockerComposeVersion is the version of docker-compose to use.
-	DockerComposeVersion string
+	// JaegerVersion is the version of Jaeger to use.
+	JaegerVersion string
+
+	// MetricsServerVersion is the version of metrics-server to use.
+	MetricsServerVersion string
 
 	// KindVersion is the version of kind to use.
 	KindVersion string
@@ -105,11 +132,26 @@ type KwokctlConfigurationOptions struct {
 	// KubeSchedulerConfig is the configuration path for kube-scheduler.
 	KubeSchedulerConfig string
 
+	// Components is the configuration for components.
+	Components []string
+
+	// Disable is the configuration for disables components.
+	Disable []string
+
+	// Enable is the configuration for enables components.
+	Enable []string
+
 	// DisableKubeScheduler is the flag to disable kube-scheduler.
+	// Deprecated: Use Disable instead
 	DisableKubeScheduler bool
 
 	// DisableKubeControllerManager is the flag to disable kube-controller-manager.
+	// Deprecated: Use Disable instead
 	DisableKubeControllerManager bool
+
+	// EnableMetricsServer is the flag to enable metrics-server.
+	// Deprecated: Use Enable instead
+	EnableMetricsServer bool
 
 	// EtcdImage is the image of etcd.
 	EtcdImage string
@@ -123,11 +165,26 @@ type KwokctlConfigurationOptions struct {
 	// KubeSchedulerImage is the image of kube-scheduler.
 	KubeSchedulerImage string
 
+	// KubectlImage is the image of kubectl.
+	KubectlImage string
+
 	// KwokControllerImage is the image of Kwok.
 	KwokControllerImage string
 
+	// DashboardImage is the image of dashboard.
+	DashboardImage string
+
+	// DashboardMetricsScraperImage is the image of dashboard metrics scraper.
+	DashboardMetricsScraperImage string
+
 	// PrometheusImage is the image of Prometheus.
 	PrometheusImage string
+
+	// JaegerImage is the image of Jaeger
+	JaegerImage string
+
+	// MetricsServerImage is the image of metrics-server.
+	MetricsServerImage string
 
 	// KindNodeImage is the image of kind node.
 	KindNodeImage string
@@ -148,29 +205,45 @@ type KwokctlConfigurationOptions struct {
 	// KubectlBinary is the binary of kubectl.
 	KubectlBinary string
 
+	// EtcdctlBinary is the binary of etcdctl.
+	EtcdctlBinary string
+
 	// EtcdBinary is the binary of etcd.
 	EtcdBinary string
 
 	// EtcdBinaryTar is the tar of the binary of etcd.
+	// Deprecated: Use EtcdBinary instead
 	EtcdBinaryTar string
+
+	// EtcdPrefix is the prefix of etcd.
+	EtcdPrefix string
 
 	// KwokControllerBinary is the binary of kwok.
 	KwokControllerBinary string
+
+	// TODO: Add dashboard binary
+	// // DashboardBinary is the binary of dashboard.
+	// DashboardBinary string
 
 	// PrometheusBinary  is the binary of Prometheus.
 	PrometheusBinary string
 
 	// PrometheusBinaryTar is the tar of binary of Prometheus.
+	// Deprecated: Use PrometheusBinary instead
 	PrometheusBinaryTar string
 
-	// DockerComposeBinary is the binary of Docker compose.
-	DockerComposeBinary string
+	// JaegerBinary  is the binary of Jaeger.
+	JaegerBinary string
+
+	// JaegerBinaryTar is the tar of binary of Jaeger.
+	// Deprecated: Use JaegerBinary instead
+	JaegerBinaryTar string
+
+	// MetricsServerBinary is the binary of metrics-server.
+	MetricsServerBinary string
 
 	// KindBinary is the binary of kind.
 	KindBinary string
-
-	// Mode is several default parameter templates for clusters
-	Mode string
 
 	// KubeFeatureGates is a set of key=value pairs that describe feature gates for alpha/experimental features of Kubernetes.
 	KubeFeatureGates string
@@ -199,8 +272,14 @@ type KwokctlConfigurationOptions struct {
 	// KubeSchedulerPort is kube-scheduler port in the binary runtime
 	KubeSchedulerPort uint32
 
+	// DashboardPort is dashboard port that is exposed to the host.
+	DashboardPort uint32
+
 	// KwokControllerPort is kwok-controller port that is exposed to the host.
 	KwokControllerPort uint32
+
+	// MetricsServerPort is metrics-server port that is exposed to the host.
+	MetricsServerPort uint32
 
 	// CacheDir is the directory of the cache.
 	CacheDir string
@@ -217,6 +296,9 @@ type KwokctlConfigurationOptions struct {
 	// NodeLeaseDurationSeconds is the duration the Kubelet will set on its corresponding Lease.
 	NodeLeaseDurationSeconds uint
 
+	// HeartbeatFactor is the scale factor for all about heartbeat.
+	HeartbeatFactor float64
+
 	// BindAddress is the address to bind to.
 	BindAddress string
 
@@ -225,6 +307,9 @@ type KwokctlConfigurationOptions struct {
 
 	// DisableQPSLimits specifies whether to disable QPS limits for components.
 	DisableQPSLimits bool
+
+	// EtcdQuotaBackendSize is the backend quota for etcd.
+	EtcdQuotaBackendSize string
 }
 
 // Component is a component of the cluster.
@@ -264,6 +349,12 @@ type Component struct {
 	// Volumes is a list of named volumes that can be mounted by containers belonging to the component.
 	Volumes []Volume
 
+	// Metric is the metric of the component.
+	Metric *ComponentMetric
+
+	// MetricsDiscovery is the metrics discovery of the component.
+	MetricsDiscovery *ComponentMetric
+
 	// Version is the version of the component.
 	Version string
 }
@@ -289,6 +380,23 @@ type Port struct {
 	HostPort uint32
 	// Protocol for port. Must be UDP, TCP, or SCTP.
 	Protocol Protocol
+}
+
+// ComponentMetric represents a metric of a component.
+type ComponentMetric struct {
+	// Scheme is the scheme of the metric.
+	Scheme string
+	// Host is the host of the metric.
+	Host string
+	// Path is the path of the metric.
+	Path string
+
+	// CertPath is the cert path of the metric.
+	CertPath string
+	// KeyPath is the key path of the metric.
+	KeyPath string
+	// InsecureSkipVerify is the flag to skip verify the metric.
+	InsecureSkipVerify bool
 }
 
 // Protocol defines network protocols supported for things like component ports.

@@ -19,9 +19,6 @@ package yaml
 import (
 	"io"
 	"sync/atomic"
-
-	"k8s.io/apimachinery/pkg/runtime"
-	"sigs.k8s.io/yaml"
 )
 
 // Encoder is a YAML encoder.
@@ -40,7 +37,7 @@ func NewEncoder(w io.Writer) *Encoder {
 var separator = []byte("---\n")
 
 // Encode prints the object as YAML.
-func (p *Encoder) Encode(obj runtime.Object) error {
+func (p *Encoder) Encode(obj any) error {
 	count := atomic.AddInt64(&p.printCount, 1)
 	if count > 1 {
 		if _, err := p.w.Write(separator); err != nil {
@@ -48,7 +45,7 @@ func (p *Encoder) Encode(obj runtime.Object) error {
 		}
 	}
 
-	output, err := yaml.Marshal(obj)
+	output, err := Marshal(obj)
 	if err != nil {
 		return err
 	}

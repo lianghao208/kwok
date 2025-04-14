@@ -42,14 +42,14 @@ func NewVersion(major, minor, patch uint64) Version {
 	}
 }
 
-var versionRegexp = regexp.MustCompile(`(kubernetes|version):? v?(\d+\.\d+\.\d+\S*)`)
+var versionRegexp = regexp.MustCompile(`(kubernetes|version)?:? ?v?(\d+\.\d+\.\d+(-\S*)?)`)
 
 // ParseFromOutput parses the version from the output.
 func ParseFromOutput(s string) (Version, error) {
 	s = strings.ToLower(s)
 	matches := versionRegexp.FindStringSubmatch(s)
 	if len(matches) == 0 {
-		return Version{}, fmt.Errorf("failed to parse version from output: %q", s)
+		return semver.Version{}, fmt.Errorf("failed to parse version from output: %q", s)
 	}
 	v := matches[2]
 	if strings.HasPrefix(v, "0.0.0") {

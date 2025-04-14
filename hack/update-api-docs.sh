@@ -24,7 +24,7 @@ ROOT_DIR="$(realpath "${DIR}/..")"
 function gendoc() {
   local confdir="${ROOT_DIR}/hack/api_docs"
 
-  go run github.com/ahmetb/gen-crd-api-reference-docs \
+  go run github.com/ahmetb/gen-crd-api-reference-docs@v0.3.0 \
     -template-dir "${confdir}" \
     -config "${confdir}/config.json" \
     "$@"

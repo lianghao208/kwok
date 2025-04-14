@@ -19,13 +19,11 @@ package log
 import (
 	"context"
 	"fmt"
+	"log/slog" //nolint:depguard
 	"runtime"
 	"strconv"
 	"strings"
 	"time"
-
-	//nolint:depguard
-	"golang.org/x/exp/slog"
 )
 
 // Level is the logging level.

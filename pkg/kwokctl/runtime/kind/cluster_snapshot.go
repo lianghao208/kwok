@@ -18,8 +18,14 @@ package kind
 
 import (
 	"context"
+	"crypto/tls"
 
+	"sigs.k8s.io/kwok/pkg/consts"
+	"sigs.k8s.io/kwok/pkg/kwokctl/etcd"
+	"sigs.k8s.io/kwok/pkg/kwokctl/runtime"
 	"sigs.k8s.io/kwok/pkg/log"
+	"sigs.k8s.io/kwok/pkg/utils/format"
+	"sigs.k8s.io/kwok/pkg/utils/net"
 	"sigs.k8s.io/kwok/pkg/utils/wait"
 )
 
@@ -56,20 +62,38 @@ func (c *Cluster) SnapshotSave(ctx context.Context, path string) error {
 // SnapshotRestore restore the snapshot of cluster
 func (c *Cluster) SnapshotRestore(ctx context.Context, path string) error {
 	logger := log.FromContext(ctx)
-	err := c.StopComponent(ctx, "etcd")
-	if err != nil {
-		logger.Error("Failed to stop etcd", err)
+	clusterName := c.getClusterName()
+
+	components := []string{
+		consts.ComponentEtcd,
+	}
+	for _, component := range components {
+		err := c.StopComponent(ctx, component)
+		if err != nil {
+			logger.Error("Failed to stop", err, "component", component)
+		}
 	}
 	defer func() {
-		err = c.StartComponent(ctx, "etcd")
+		for _, component := range components {
+			err := c.StartComponent(ctx, component)
+			if err != nil {
+				logger.Error("Failed to start", err, "component", component)
+			}
+		}
+
+		err := c.Stop(ctx)
 		if err != nil {
-			logger.Error("Failed to start etcd", err)
+			logger.Error("Failed to stop", err)
+		}
+		err = c.Start(ctx)
+		if err != nil {
+			logger.Error("Failed to start", err)
 		}
 	}()
 
 	// Restore snapshot to host temporary directory
-	etcdDataTmp := c.GetWorkdirPath("etcd")
-	err = c.Etcdctl(ctx, "snapshot", "restore", path, "--data-dir", etcdDataTmp)
+	etcdDataTmp := c.GetWorkdirPath(consts.ComponentEtcd)
+	err := c.Etcdctl(ctx, "snapshot", "restore", path, "--data-dir", etcdDataTmp)
 	if err != nil {
 		return err
 	}
@@ -80,9 +104,8 @@ func (c *Cluster) SnapshotRestore(ctx context.Context, path string) error {
 		}
 	}()
 
-	kindName := c.getClusterName()
 	// Copy to kind container from host temporary directory
-	err = c.Exec(ctx, c.runtime, "cp", etcdDataTmp, kindName+":/var/lib/")
+	err = c.Exec(ctx, c.runtime, "cp", etcdDataTmp, clusterName+":/var/lib/")
 	if err != nil {
 		return err
 	}
@@ -91,8 +114,8 @@ func (c *Cluster) SnapshotRestore(ctx context.Context, path string) error {
 }
 
 // SnapshotSaveWithYAML save the snapshot of cluster
-func (c *Cluster) SnapshotSaveWithYAML(ctx context.Context, path string, filters []string) error {
-	err := c.Cluster.SnapshotSaveWithYAML(ctx, path, filters)
+func (c *Cluster) SnapshotSaveWithYAML(ctx context.Context, path string, conf runtime.SnapshotSaveWithYAMLConfig) error {
+	err := c.Cluster.SnapshotSaveWithYAML(ctx, path, conf)
 	if err != nil {
 		return err
 	}
@@ -100,25 +123,88 @@ func (c *Cluster) SnapshotSaveWithYAML(ctx context.Context, path string, filters
 }
 
 // SnapshotRestoreWithYAML restore the snapshot of cluster
-func (c *Cluster) SnapshotRestoreWithYAML(ctx context.Context, path string, filters []string) error {
+func (c *Cluster) SnapshotRestoreWithYAML(ctx context.Context, path string, conf runtime.SnapshotRestoreWithYAMLConfig) error {
 	logger := log.FromContext(ctx)
-	err := wait.Poll(ctx, func(ctx context.Context) (bool, error) {
-		err := c.StopComponent(ctx, "kube-controller-manager")
-		return err == nil, err
-	})
-	if err != nil {
-		logger.Error("Failed to stop kube-controller-manager", err)
+	components := []string{
+		consts.ComponentKubeScheduler,
+		consts.ComponentKubeControllerManager,
+		consts.ComponentKwokController,
+	}
+	for _, component := range components {
+		err := wait.Poll(ctx, func(ctx context.Context) (bool, error) {
+			err := c.StopComponent(ctx, component)
+			return err == nil, err
+		})
+		if err != nil {
+			logger.Error("Failed to stop", err, "component", component)
+		}
 	}
 	defer func() {
-		err = c.StartComponent(ctx, "kube-controller-manager")
-		if err != nil {
-			logger.Error("Failed to start kube-controller-manager", err)
+		for _, component := range components {
+			err := c.StartComponent(ctx, component)
+			if err != nil {
+				logger.Error("Failed to start", err, "component", component)
+			}
 		}
 	}()
 
-	err = c.Cluster.SnapshotRestoreWithYAML(ctx, path, filters)
+	err := c.Cluster.SnapshotRestoreWithYAML(ctx, path, conf)
 	if err != nil {
 		return err
 	}
 	return nil
+}
+
+// GetEtcdClient returns the etcd client of cluster
+func (c *Cluster) GetEtcdClient(ctx context.Context) (etcd.Client, func(), error) {
+	certFile := c.GetWorkdirPath("pki/etcd/server.crt")
+	keyFile := c.GetWorkdirPath("pki/etcd/server.key")
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	config, err := c.Config(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	conf := &config.Options
+
+	if conf.EtcdPort == 0 {
+		unused, err := net.GetUnusedPort(ctx, nil)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		cli, err := etcd.NewClient(etcd.ClientConfig{
+			Endpoints: []string{"https://" + net.LocalAddress + ":" + format.String(unused)},
+			TLS: &tls.Config{
+				Certificates: []tls.Certificate{cert},
+				//nolint:gosec
+				InsecureSkipVerify: true,
+			},
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+
+		cancel, err := c.PortForward(ctx, consts.ComponentEtcd, "2379", unused)
+		if err != nil {
+			return nil, nil, err
+		}
+		return cli, cancel, nil
+	}
+
+	cli, err := etcd.NewClient(etcd.ClientConfig{
+		Endpoints: []string{"https://" + net.LocalAddress + ":" + format.String(conf.EtcdPort)},
+		TLS: &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			//nolint:gosec
+			InsecureSkipVerify: true,
+		},
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return cli, func() {}, nil
 }

@@ -31,6 +31,7 @@ const (
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Cluster
 // +kubebuilder:rbac:groups=kwok.x-k8s.io,resources=stages,verbs=create;delete;get;list;patch;update;watch
+// +kubebuilder:rbac:groups=kwok.x-k8s.io,resources=stages/status,verbs=update;patch
 
 // Stage is an API that describes the staged change of a resource
 type Stage struct {
@@ -62,12 +63,16 @@ type StageSpec struct {
 	ResourceRef StageResourceRef `json:"resourceRef"`
 	// Selector specifies the stags will be applied to the selected resource.
 	Selector *StageSelector `json:"selector,omitempty"`
-	// Weight means the current stage, in case of multiple stages,
+	// Weight means when multiple stages share the same ResourceRef and Selector,
 	// a random stage will be matched as the next stage based on the weight.
 	// +default=0
 	// +kubebuilder:default=0
 	// +kubebuilder:validation:Minimum=0
 	Weight int `json:"weight,omitempty"`
+	// WeightFrom means is the expression used to get the value.
+	// If it is a number type, convert to int.
+	// If it is a string type, the value get will be parsed by strconv.ParseInt.
+	WeightFrom *ExpressionFromSource `json:"weightFrom,omitempty"`
 	// Delay means there is a delay in this stage.
 	Delay *StageDelay `json:"delay,omitempty"`
 	// Next indicates that this stage will be moved to.
@@ -83,7 +88,6 @@ type StageResourceRef struct {
 	// +kubebuilder:default="v1"
 	APIGroup string `json:"apiGroup,omitempty"`
 	// Kind of the referent.
-	// +kubebuilder:validation:Enum=Pod;Node
 	Kind string `json:"kind"`
 }
 
@@ -116,8 +120,63 @@ type StageNext struct {
 	Finalizers *StageFinalizers `json:"finalizers,omitempty"`
 	// Delete means that the resource will be deleted if true.
 	Delete bool `json:"delete,omitempty"`
+	// Patches means that the resource will be patched.
+	Patches []StagePatch `json:"patches,omitempty"`
+
 	// StatusTemplate indicates the template for modifying the status of the resource in the next.
+	// Deprecated: Use Patches instead.
+	//+k8s:conversion-gen=false
 	StatusTemplate string `json:"statusTemplate,omitempty"`
+	// StatusSubresource indicates the name of the subresource that will be patched. The support for
+	// this field is not available in Pod and Node resources.
+	// +default="status"
+	// +kubebuilder:default=status
+	// Deprecated: Use Patches instead.
+	//+k8s:conversion-gen=false
+	StatusSubresource *string `json:"statusSubresource,omitempty"`
+	// StatusPatchAs indicates the impersonating configuration for client when patching status.
+	// In most cases this will be empty, in which case the default client service account will be used.
+	// When this is not empty, a corresponding rbac change is required to grant `impersonate` privilege.
+	// The support for this field is not available in Pod and Node resources.
+	// Deprecated: Use Patches instead.
+	//+k8s:conversion-gen=false
+	StatusPatchAs *ImpersonationConfig `json:"statusPatchAs,omitempty"`
+}
+
+// StagePatch describes the patch for the resource.
+type StagePatch struct {
+	// Subresource indicates the name of the subresource that will be patched.
+	Subresource string `json:"subresource,omitempty"`
+	// Root indicates the root of the template calculated by the patch.
+	Root string `json:"root,omitempty"`
+	// Template indicates the template for modifying the resource in the next.
+	Template string `json:"template,omitempty"`
+	// Type indicates the type of the patch.
+	// +kubebuilder:validation:Enum=json;merge;strategic
+	Type *StagePatchType `json:"type,omitempty"`
+	// Impersonation indicates the impersonating configuration for client when patching status.
+	// In most cases this will be empty, in which case the default client service account will be used.
+	// When this is not empty, a corresponding rbac change is required to grant `impersonate` privilege.
+	// The support for this field is not available in Pod and Node resources.
+	Impersonation *ImpersonationConfig `json:"impersonation,omitempty"`
+}
+
+// StagePatchType is the type of the patch.
+type StagePatchType string
+
+const (
+	// StagePatchTypeJSONPatch is the JSON patch type.
+	StagePatchTypeJSONPatch StagePatchType = "json"
+	// StagePatchTypeMergePatch is the merge patch type.
+	StagePatchTypeMergePatch StagePatchType = "merge"
+	// StagePatchTypeStrategicMergePatch is the strategic merge patch type.
+	StagePatchTypeStrategicMergePatch StagePatchType = "strategic"
+)
+
+// ImpersonationConfig describes the configuration for impersonating clients
+type ImpersonationConfig struct {
+	// Username the target username for the client to impersonate
+	Username string `json:"username"`
 }
 
 // StageFinalizers describes the modifications in the finalizers of a resource.

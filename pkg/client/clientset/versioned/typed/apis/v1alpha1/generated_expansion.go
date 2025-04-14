@@ -1,5 +1,5 @@
 /*
-Copyright 2023 The Kubernetes Authors.
+Copyright The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -28,6 +28,8 @@ type ClusterLogsExpansion interface{}
 
 type ClusterPortForwardExpansion interface{}
 
+type ClusterResourceUsageExpansion interface{}
+
 type ExecExpansion interface{}
 
 type LogsExpansion interface{}
@@ -35,5 +37,7 @@ type LogsExpansion interface{}
 type MetricExpansion interface{}
 
 type PortForwardExpansion interface{}
+
+type ResourceUsageExpansion interface{}
 
 type StageExpansion interface{}

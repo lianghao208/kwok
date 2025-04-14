@@ -62,12 +62,21 @@ func (m *SyncMap[K, V]) LoadAndDelete(key K) (value V, loaded bool) {
 }
 
 // LoadOrStore returns the existing value for the key if present.
-func (m *SyncMap[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
+func (m *SyncMap[K, V]) LoadOrStore(key K, value V) (V, bool) {
 	v, loaded := m.m.LoadOrStore(key, value)
-	if loaded {
-		return v.(V), loaded
+	if !loaded {
+		return value, loaded
 	}
-	return value, loaded
+	return v.(V), loaded
+}
+
+// Swap stores value for key and returns the previous value for that key.
+func (m *SyncMap[K, V]) Swap(key K, value V) (V, bool) {
+	v, loaded := m.m.Swap(key, value)
+	if !loaded {
+		return value, loaded
+	}
+	return v.(V), loaded
 }
 
 // Size returns the number of items in the map.
@@ -98,4 +107,14 @@ func (m *SyncMap[K, V]) Values() []V {
 		return true
 	})
 	return values
+}
+
+// IsEmpty returns true if the map is empty.
+func (m *SyncMap[K, V]) IsEmpty() bool {
+	empty := true
+	m.m.Range(func(key, value interface{}) bool {
+		empty = false
+		return false
+	})
+	return empty
 }

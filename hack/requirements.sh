@@ -23,13 +23,17 @@ LOCAL_BIN_DIR="${ROOT_DIR}/bin"
 
 export PATH="${LOCAL_BIN_DIR}:${PATH}"
 
-KIND_VERSION=0.19.0
+KIND_VERSION=0.23.0
 
-KUBE_VERSION=1.27.3
+KUBE_VERSION=1.32.2
 
 # TODO: Stay at 0.9 in figuring out the Attestations of buildx.
 # https://github.com/docker/buildx/pull/1412
 BUILDX_VERSION=0.9.1
+
+KUSTOMIZE_VERSION=5.3.0
+
+GO_VERSION=1.23.0
 
 function command_exist() {
   local command="${1}"
@@ -104,6 +108,31 @@ function install_gsutil() {
   gsutil version
 }
 
+function install_go() {
+  if command_exist go; then
+    if [[ $(go version | awk -F . '{ print $2 }') -ge $(echo "${GO_VERSION}" | awk -F . '{ print $2 }') ]]; then
+      return 0
+    fi
+  fi
+
+  mkdir -p "${LOCAL_BIN_DIR}/go${GO_VERSION}"
+  curl -SL -o /tmp/go.tar.gz "https://dl.google.com/go/go${GO_VERSION}.$(runtime_os)-$(runtime_arch).tar.gz" &&
+    tar -C "${LOCAL_BIN_DIR}/go${GO_VERSION}" -xzf /tmp/go.tar.gz &&
+    rm /tmp/go.tar.gz
+
+  ln -s "${LOCAL_BIN_DIR}/go${GO_VERSION}/go/bin/go" "${LOCAL_BIN_DIR}/go${GO_VERSION}/go/bin/gofmt" "${LOCAL_BIN_DIR}/"
+
+  if ! command_exist go; then
+    echo go is installed but not effective >&2
+    return 1
+  fi
+
+  if [[ $(go version | awk -F . '{ print $2 }') -lt $(echo "${GO_VERSION}" | awk -F . '{ print $2 }') ]]; then
+    echo go version is lower than ${GO_VERSION} >&2
+    return 1
+  fi
+}
+
 function install_kind() {
   if command_exist kind; then
     return 0
@@ -167,7 +196,7 @@ function install_kustomize() {
   fi
 
   mkdir -p "${LOCAL_BIN_DIR}"
-  GOBIN="${LOCAL_BIN_DIR}" go install sigs.k8s.io/kustomize/kustomize/v4
+  GOBIN="${LOCAL_BIN_DIR}" go install sigs.k8s.io/kustomize/kustomize/v5@v${KUSTOMIZE_VERSION}
   if ! command_exist kustomize; then
     echo kustomize is installed but not effective >&2
     return 1

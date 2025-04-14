@@ -22,6 +22,8 @@ import (
 	"time"
 
 	"sigs.k8s.io/kwok/pkg/apis/internalversion"
+	"sigs.k8s.io/kwok/pkg/kwokctl/etcd"
+	"sigs.k8s.io/kwok/pkg/utils/client"
 )
 
 // Runtime is the interface for a runtime.
@@ -64,6 +66,15 @@ type Runtime interface {
 
 	// GetComponent return the component if it exists
 	GetComponent(ctx context.Context, name string) (internalversion.Component, error)
+
+	// ListComponents list the components of cluster
+	ListComponents(ctx context.Context) ([]internalversion.Component, error)
+
+	// InspectComponent inspect the component
+	InspectComponent(ctx context.Context, name string) (ComponentStatus, error)
+
+	// PortForward expose the port of the component
+	PortForward(ctx context.Context, name string, portOrName string, hostPort uint32) (cancel func(), retErr error)
 
 	// Ready check the cluster is ready
 	Ready(ctx context.Context) (bool, error)
@@ -114,10 +125,10 @@ type Runtime interface {
 	SnapshotRestore(ctx context.Context, path string) error
 
 	// SnapshotSaveWithYAML save the snapshot of cluster
-	SnapshotSaveWithYAML(ctx context.Context, path string, filters []string) error
+	SnapshotSaveWithYAML(ctx context.Context, path string, conf SnapshotSaveWithYAMLConfig) error
 
 	// SnapshotRestoreWithYAML restore the snapshot of cluster
-	SnapshotRestoreWithYAML(ctx context.Context, path string, filters []string) error
+	SnapshotRestoreWithYAML(ctx context.Context, path string, conf SnapshotRestoreWithYAMLConfig) error
 
 	// GetWorkdirPath get the workdir path of cluster
 	GetWorkdirPath(name string) string
@@ -125,6 +136,32 @@ type Runtime interface {
 	// InitCRDs init the crds of cluster
 	InitCRDs(ctx context.Context) error
 
+	// InitCRs init the crs of cluster
+	InitCRs(ctx context.Context) error
+
 	// IsDryRun returns true if the runtime is in dry-run mode
 	IsDryRun() bool
+
+	// GetClientset returns the clientset of cluster
+	GetClientset(ctx context.Context) (client.Clientset, error)
+
+	// GetEtcdClient returns the etcd client of cluster
+	GetEtcdClient(ctx context.Context) (etcd.Client, func(), error)
 }
+
+type SnapshotSaveWithYAMLConfig struct {
+	Filters []string
+}
+
+type SnapshotRestoreWithYAMLConfig struct {
+	Filters []string
+}
+
+type ComponentStatus uint64
+
+const (
+	ComponentStatusUnknown ComponentStatus = iota
+	ComponentStatusStopped
+	ComponentStatusRunning
+	ComponentStatusReady
+)

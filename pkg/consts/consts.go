@@ -24,7 +24,7 @@ var (
 
 	// Version is the version of the project.
 	// It will be overwritten during the `make build` process.
-	Version      = "0.3.0"
+	Version      = "0.7.0"
 	BinaryPrefix = "https://github.com/kubernetes-sigs/kwok/releases/download"
 	ImagePrefix  = "registry.k8s.io/kwok"
 
@@ -34,25 +34,34 @@ var (
 
 	// KubeVersion is the version of Kubernetes.
 	// It will be overwritten during the `make build` process.
-	KubeVersion      = "1.27.3"
-	KubeBinaryPrefix = "https://dl.k8s.io/release"
-	KubeImagePrefix  = "registry.k8s.io"
+	KubeVersion                = "1.32.2"
+	KubeBinaryPrefix           = "https://dl.k8s.io/release"
+	KubeBinaryUnofficialPrefix = "https://github.com/kwok-ci/k8s/releases/download"
+	KubeImagePrefix            = "registry.k8s.io"
 
 	EtcdBinaryPrefix = "https://github.com/etcd-io/etcd/releases/download"
 
-	// DockerComposeVersion
-	// Deprecated: will be removed in the future.
-	DockerComposeVersion      = "2.17.2"
-	DockerComposeBinaryPrefix = "https://github.com/docker/compose/releases/download"
+	KindVersion         = "0.23.0"
+	KindBinaryPrefix    = "https://github.com/kubernetes-sigs/kind/releases/download"
+	KindNodeImagePrefix = "docker.io/kindest"
 
-	KindVersion      = "0.19.0"
-	KindBinaryPrefix = "https://github.com/kubernetes-sigs/kind/releases/download"
+	DashboardVersion      = "2.7.0"
+	DashboardBinaryPrefix = ""
+	DashboardImagePrefix  = "docker.io/kubernetesui"
 
-	PrometheusVersion      = "2.44.0"
+	DashboardMetricsScraperVersion = "1.0.9"
+
+	PrometheusVersion      = "2.53.0"
 	PrometheusBinaryPrefix = "https://github.com/prometheus/prometheus/releases/download"
 	PrometheusImagePrefix  = "docker.io/prom"
 
-	KindNodeImagePrefix = "docker.io/kindest"
+	JaegerVersion      = "1.58.1"
+	JaegerBinaryPrefix = "https://github.com/jaegertracing/jaeger/releases/download"
+	JaegerImagePrefix  = "docker.io/jaegertracing"
+
+	MetricsServerVersion      = "0.7.1"
+	MetricsServerBinaryPrefix = "https://github.com/kubernetes-sigs/metrics-server/releases/download"
+	MetricsServerImagePrefix  = "registry.k8s.io/metrics-server"
 
 	DefaultUnlimitedQPS   = 5000.0
 	DefaultUnlimitedBurst = 10000
@@ -60,10 +69,47 @@ var (
 
 // The following runtime is provided.
 const (
-	RuntimeTypeKind       = "kind"
+	// RuntimeTypeBinary is the binary runtime.
+	RuntimeTypeBinary = "binary"
+
+	// Container runtime type, will create a container for each component.
+
+	// RuntimeTypeDocker is the docker runtime.
+	RuntimeTypeDocker = "docker"
+	// RuntimeTypePodman is the podman runtime.
+	RuntimeTypePodman = "podman"
+	// RuntimeTypeNerdctl is the nerdctl runtime.
+	RuntimeTypeNerdctl = "nerdctl"
+	// RuntimeTypeLima is the lima runtime.
+	RuntimeTypeLima = "lima"
+	// RuntimeTypeFinch is the finch runtime.
+	RuntimeTypeFinch = "finch"
+
+	// Cluster runtime type, creates a cluster and deploys the components in the cluster.
+
+	// RuntimeTypeKind is the kind runtime.
+	RuntimeTypeKind = "kind"
+	// RuntimeTypeKindPodman is the kind runtime with podman.
 	RuntimeTypeKindPodman = RuntimeTypeKind + "-" + RuntimeTypePodman
-	RuntimeTypeDocker     = "docker"
-	RuntimeTypeNerdctl    = "nerdctl"
-	RuntimeTypePodman     = "podman"
-	RuntimeTypeBinary     = "binary"
+	// RuntimeTypeKindNerdctl is the kind runtime with nerdctl.
+	RuntimeTypeKindNerdctl = RuntimeTypeKind + "-" + RuntimeTypeNerdctl
+	// RuntimeTypeKindLima is the kind runtime with lima.
+	RuntimeTypeKindLima = RuntimeTypeKind + "-" + RuntimeTypeLima
+	// RuntimeTypeKindFinch is the kind runtime with finch.
+	RuntimeTypeKindFinch = RuntimeTypeKind + "-" + RuntimeTypeFinch
+)
+
+// The following components is provided.
+const (
+	ComponentEtcd                       = "etcd"
+	ComponentKubeApiserver              = "kube-apiserver"
+	ComponentKubeApiserverInsecureProxy = "kube-apiserver-insecure-proxy"
+	ComponentKubeControllerManager      = "kube-controller-manager"
+	ComponentKubeScheduler              = "kube-scheduler"
+	ComponentKwokController             = "kwok-controller"
+	ComponentDashboard                  = "dashboard"
+	ComponentDashboardMetricsScraper    = "dashboard-metrics-scraper"
+	ComponentPrometheus                 = "prometheus"
+	ComponentJaeger                     = "jaeger"
+	ComponentMetricsServer              = "metrics-server"
 )

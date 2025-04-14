@@ -25,7 +25,6 @@ import (
 	"path"
 
 	"github.com/spf13/cobra"
-	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 
 	"sigs.k8s.io/kwok/kustomize/kwokctl/resource"
 	"sigs.k8s.io/kwok/pkg/apis/internalversion"
@@ -35,6 +34,7 @@ import (
 	"sigs.k8s.io/kwok/pkg/kwokctl/scale"
 	"sigs.k8s.io/kwok/pkg/log"
 	"sigs.k8s.io/kwok/pkg/utils/client"
+	"sigs.k8s.io/kwok/pkg/utils/expression"
 	"sigs.k8s.io/kwok/pkg/utils/slices"
 )
 
@@ -78,7 +78,7 @@ func runE(ctx context.Context, flags *flagpole, args []string) error {
 	rt, err := runtime.DefaultRegistry.Load(ctx, name, workdir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			logger.Warn("Cluster is not exists")
+			logger.Warn("Cluster does not exist")
 		}
 		return err
 	}
@@ -99,23 +99,24 @@ func runE(ctx context.Context, flags *flagpole, args []string) error {
 		return krc.Name == resourceKind
 	})
 	if !ok {
+		var resourceData string
 		switch resourceKind {
 		default:
 			return fmt.Errorf("resource %s is not exists", resourceKind)
 		case "pod":
-			err = utilyaml.Unmarshal([]byte(resource.DefaultPod), &krc)
-			if err != nil {
-				return err
-			}
+			resourceData = resource.DefaultPod
 		case "node":
-			err = utilyaml.Unmarshal([]byte(resource.DefaultNode), &krc)
-			if err != nil {
-				return err
-			}
+			resourceData = resource.DefaultNode
+		}
+
+		logger.Info("No resource found, use default resource", "resource", resourceKind)
+		krc, err = config.UnmarshalWithType[*internalversion.KwokctlResource](resourceData)
+		if err != nil {
+			return err
 		}
 	}
 
-	parameters, err := scale.NewParameters(ctx, krc.Parameters, flags.Params)
+	parameters, err := expression.NewParameters(ctx, krc.Parameters, flags.Params)
 	if err != nil {
 		return err
 	}

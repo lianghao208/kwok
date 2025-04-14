@@ -23,11 +23,10 @@ import (
 	"strings"
 	"text/template"
 
-	"sigs.k8s.io/yaml"
-
 	"sigs.k8s.io/kwok/pkg/utils/maps"
 	"sigs.k8s.io/kwok/pkg/utils/pools"
 	"sigs.k8s.io/kwok/pkg/utils/slices"
+	"sigs.k8s.io/kwok/pkg/utils/yaml"
 )
 
 // FuncMap is a map of functions that can be used in templates.
@@ -62,7 +61,11 @@ func (r *renderer) render(buf *bytes.Buffer, text string, original interface{}) 
 	temp, ok := r.cache.Load(text)
 	if !ok {
 		var err error
-		temp, err = template.New("_").Funcs(r.funcMap).Parse(text)
+		temp, err = template.New("_").
+			Funcs(genericFuncs).
+			Funcs(defaultFuncs).
+			Funcs(r.funcMap).
+			Parse(text)
 		if err != nil {
 			return err
 		}

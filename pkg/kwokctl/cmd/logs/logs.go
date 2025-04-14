@@ -40,8 +40,8 @@ func NewCommand(ctx context.Context) *cobra.Command {
 	flags := &flagpole{}
 
 	cmd := &cobra.Command{
-		Use:   "logs [command]",
-		Short: "Logs one of [audit, etcd, kube-apiserver, kube-controller-manager, kube-scheduler, kwok-controller, prometheus]",
+		Use:   "logs [component]",
+		Short: "Logs one of [audit, etcd, kube-apiserver, kube-controller-manager, kube-scheduler, kwok-controller, dashboard, metrics-server, prometheus, jaeger]",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
 				return cmd.Help()
@@ -65,7 +65,7 @@ func runE(ctx context.Context, flags *flagpole, args []string) error {
 	rt, err := runtime.DefaultRegistry.Load(ctx, name, workdir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			logger.Warn("Cluster is not exists")
+			logger.Warn("Cluster does not exist")
 		}
 		return err
 	}

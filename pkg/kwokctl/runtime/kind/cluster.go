@@ -19,7 +19,6 @@ package kind
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -27,20 +26,28 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
 
 	"sigs.k8s.io/kwok/pkg/apis/internalversion"
 	"sigs.k8s.io/kwok/pkg/consts"
+	"sigs.k8s.io/kwok/pkg/kwokctl/components"
 	"sigs.k8s.io/kwok/pkg/kwokctl/dryrun"
+	"sigs.k8s.io/kwok/pkg/kwokctl/k8s"
 	"sigs.k8s.io/kwok/pkg/kwokctl/runtime"
+	"sigs.k8s.io/kwok/pkg/kwokctl/snapshot"
 	"sigs.k8s.io/kwok/pkg/log"
 	"sigs.k8s.io/kwok/pkg/utils/exec"
 	"sigs.k8s.io/kwok/pkg/utils/file"
 	"sigs.k8s.io/kwok/pkg/utils/format"
 	"sigs.k8s.io/kwok/pkg/utils/net"
 	"sigs.k8s.io/kwok/pkg/utils/path"
+	"sigs.k8s.io/kwok/pkg/utils/sets"
 	"sigs.k8s.io/kwok/pkg/utils/slices"
 	"sigs.k8s.io/kwok/pkg/utils/version"
 	"sigs.k8s.io/kwok/pkg/utils/wait"
+	"sigs.k8s.io/kwok/pkg/utils/yaml"
 )
 
 // Cluster is an implementation of Runtime for kind
@@ -66,9 +73,70 @@ func NewPodmanCluster(name, workdir string) (runtime.Runtime, error) {
 	}, nil
 }
 
+// NewNerdctlCluster creates a new Runtime for kind with nerdctl
+func NewNerdctlCluster(name, workdir string) (runtime.Runtime, error) {
+	return &Cluster{
+		Cluster: runtime.NewCluster(name, workdir),
+		runtime: consts.RuntimeTypeNerdctl,
+	}, nil
+}
+
+// NewLimaCluster creates a new Runtime for kind with lima
+func NewLimaCluster(name, workdir string) (runtime.Runtime, error) {
+	return &Cluster{
+		Cluster: runtime.NewCluster(name, workdir),
+		runtime: consts.RuntimeTypeNerdctl + "." + consts.RuntimeTypeLima,
+	}, nil
+}
+
+// NewFinchCluster creates a new Runtime for kind with finch
+func NewFinchCluster(name, workdir string) (runtime.Runtime, error) {
+	return &Cluster{
+		Cluster: runtime.NewCluster(name, workdir),
+		runtime: consts.RuntimeTypeFinch,
+	}, nil
+}
+
 // Available  checks whether the runtime is available.
 func (c *Cluster) Available(ctx context.Context) error {
+	if c.IsDryRun() {
+		return nil
+	}
 	return c.Exec(ctx, c.runtime, "version")
+}
+
+func (c *Cluster) setup(ctx context.Context, env *env) error {
+	conf := &env.kwokctlConfig.Options
+
+	pkiPath := c.GetWorkdirPath(runtime.PkiName)
+	if !file.Exists(pkiPath) {
+		sans := []string{}
+		ips, err := net.GetAllIPs()
+		if err != nil {
+			logger := log.FromContext(ctx)
+			logger.Warn("failed to get all ips", "err", err)
+		} else {
+			sans = append(sans, ips...)
+		}
+		if len(conf.KubeApiserverCertSANs) != 0 {
+			sans = append(sans, conf.KubeApiserverCertSANs...)
+		}
+		err = c.MkdirAll(pkiPath)
+		if err != nil {
+			return fmt.Errorf("failed to create pki dir: %w", err)
+		}
+		err = c.GeneratePki(pkiPath, sans...)
+		if err != nil {
+			return fmt.Errorf("failed to generate pki: %w", err)
+		}
+	}
+
+	pkiEtcd := filepath.Join(pkiPath, "etcd")
+	err := c.MkdirAll(pkiEtcd)
+	if err != nil {
+		return fmt.Errorf("failed to create pki dir: %w", err)
+	}
+	return nil
 }
 
 // https://github.com/kubernetes-sigs/kind/blob/7b017b2ce14a7fdea9d3ed2fa259c38c927e2dd1/pkg/internal/runtime/runtime.go
@@ -80,6 +148,90 @@ func (c *Cluster) withProviderEnv(ctx context.Context) context.Context {
 	return ctx
 }
 
+func (c *Cluster) setupPorts(ctx context.Context, used sets.Sets[uint32], ports ...*uint32) error {
+	for _, port := range ports {
+		if port != nil && *port == 0 {
+			p, err := net.GetUnusedPort(ctx, used)
+			if err != nil {
+				return err
+			}
+			*port = p
+		}
+	}
+	return nil
+}
+
+type env struct {
+	kwokctlConfig        *internalversion.KwokctlConfiguration
+	components           []string
+	verbosity            log.Level
+	schedulerConfigPath  string
+	auditLogPath         string
+	auditPolicyPath      string
+	prometheusConfigPath string
+
+	inClusterOnHostKubeconfigPath string
+	workdir                       string
+	caCertPath                    string
+	adminKeyPath                  string
+	adminCertPath                 string
+
+	kwokConfigPath string
+
+	usedPorts sets.Sets[uint32]
+}
+
+func (c *Cluster) env(ctx context.Context) (*env, error) {
+	config, err := c.Config(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	components, err := c.Components(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	inClusterOnHostKubeconfigPath := "/etc/kubernetes/admin.conf"
+	schedulerConfigPath := "/etc/kubernetes/scheduler.conf"
+	prometheusConfigPath := "/etc/prometheus/prometheus.yaml"
+	kwokConfigPath := "/etc/kwok/kwok.yaml"
+	auditLogPath := ""
+	auditPolicyPath := ""
+	if config.Options.KubeAuditPolicy != "" {
+		auditLogPath = c.GetLogPath(runtime.AuditLogName)
+		auditPolicyPath = c.GetWorkdirPath(runtime.AuditPolicyName)
+	}
+
+	logger := log.FromContext(ctx)
+	verbosity := logger.Level()
+
+	pkiPath := "/etc/kubernetes/pki"
+
+	workdir := c.Workdir()
+	caCertPath := path.Join(pkiPath, "ca.crt")
+	adminKeyPath := path.Join(pkiPath, "admin.key")
+	adminCertPath := path.Join(pkiPath, "admin.crt")
+
+	usedPorts := runtime.GetUsedPorts(ctx)
+	return &env{
+		kwokctlConfig:                 config,
+		components:                    components,
+		verbosity:                     verbosity,
+		schedulerConfigPath:           schedulerConfigPath,
+		prometheusConfigPath:          prometheusConfigPath,
+		auditLogPath:                  auditLogPath,
+		auditPolicyPath:               auditPolicyPath,
+		inClusterOnHostKubeconfigPath: inClusterOnHostKubeconfigPath,
+		workdir:                       workdir,
+		caCertPath:                    caCertPath,
+		adminKeyPath:                  adminKeyPath,
+		adminCertPath:                 adminCertPath,
+		kwokConfigPath:                kwokConfigPath,
+		usedPorts:                     usedPorts,
+	}, nil
+}
+
 // Install installs the cluster
 func (c *Cluster) Install(ctx context.Context) error {
 	err := c.Cluster.Install(ctx)
@@ -87,67 +239,208 @@ func (c *Cluster) Install(ctx context.Context) error {
 		return err
 	}
 
-	logger := log.FromContext(ctx)
-	verbosity := logger.Level()
-	config, err := c.Config(ctx)
+	env, err := c.env(ctx)
 	if err != nil {
 		return err
 	}
-	conf := &config.Options
 
-	inClusterKubeconfig := "/etc/kubernetes/scheduler.conf"
+	err = c.preInstall(ctx, env)
+	if err != nil {
+		return err
+	}
+
+	// This is not necessary when creating a cluster use kind, but in Linux the cluster is created as root,
+	// and the files here may not have permissions when deleted, so we create them first.
+	err = c.setup(ctx, env)
+	if err != nil {
+		return err
+	}
+
+	err = c.setupPorts(ctx,
+		env.usedPorts,
+		&env.kwokctlConfig.Options.KubeApiserverPort,
+	)
+	if err != nil {
+		return err
+	}
+
+	err = c.addKind(ctx, env)
+	if err != nil {
+		return err
+	}
+
+	err = c.addEtcd(ctx, env)
+	if err != nil {
+		return err
+	}
+
+	err = c.addKubeApiserver(ctx, env)
+	if err != nil {
+		return err
+	}
+
+	err = c.addKubectlProxy(ctx, env)
+	if err != nil {
+		return err
+	}
+
+	err = c.addKubeControllerManager(ctx, env)
+	if err != nil {
+		return err
+	}
+
+	err = c.addKubeScheduler(ctx, env)
+	if err != nil {
+		return err
+	}
+
+	err = c.addKwokController(ctx, env)
+	if err != nil {
+		return err
+	}
+
+	err = c.addDashboard(ctx, env)
+	if err != nil {
+		return err
+	}
+
+	err = c.addMetricsServer(ctx, env)
+	if err != nil {
+		return err
+	}
+
+	err = c.addPrometheus(ctx, env)
+	if err != nil {
+		return err
+	}
+
+	err = c.addJaeger(ctx, env)
+	if err != nil {
+		return err
+	}
+
+	err = c.setupPrometheusConfig(ctx, env)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (c *Cluster) addKind(ctx context.Context, env *env) (err error) {
+	logger := log.FromContext(ctx)
+	conf := &env.kwokctlConfig.Options
+
+	err = c.EnsureImage(ctx, c.runtime, conf.KindNodeImage)
+	if err != nil {
+		return err
+	}
 
 	var featureGates []string
 	var runtimeConfig []string
 	if conf.KubeFeatureGates != "" {
-		featureGates = strings.Split(strings.ReplaceAll(conf.KubeFeatureGates, "=", ": "), ",")
+		featureGates = strings.Split(conf.KubeFeatureGates, ",")
 	}
 	if conf.KubeRuntimeConfig != "" {
-		runtimeConfig = strings.Split(strings.ReplaceAll(conf.KubeRuntimeConfig, "=", ": "), ",")
+		runtimeConfig = strings.Split(conf.KubeRuntimeConfig, ",")
 	}
 
-	auditLogPath := ""
-	auditPolicyPath := ""
+	pkiPath := c.GetWorkdirPath(runtime.PkiName)
+	err = c.MkdirAll(pkiPath)
+	if err != nil {
+		return err
+	}
+
+	manifestsPath := c.GetWorkdirPath(runtime.ManifestsName)
+	err = c.MkdirAll(manifestsPath)
+	if err != nil {
+		return err
+	}
+
 	if conf.KubeAuditPolicy != "" {
 		err = c.MkdirAll(c.GetWorkdirPath("logs"))
 		if err != nil {
 			return err
 		}
 
-		auditLogPath = c.GetLogPath(runtime.AuditLogName)
-		err = c.CreateFile(auditLogPath)
+		err = c.CreateFile(env.auditLogPath)
 		if err != nil {
 			return err
 		}
 
-		auditPolicyPath = c.GetWorkdirPath(runtime.AuditPolicyName)
-		err = c.CopyFile(conf.KubeAuditPolicy, auditPolicyPath)
+		err = c.CopyFile(conf.KubeAuditPolicy, env.auditPolicyPath)
 		if err != nil {
 			return err
 		}
 	}
 
 	schedulerConfigPath := ""
-	if !conf.DisableKubeScheduler && conf.KubeSchedulerConfig != "" {
+	if conf.KubeSchedulerConfig != "" && slices.Contains(env.components, consts.ComponentKubeScheduler) {
 		schedulerConfigPath = c.GetWorkdirPath(runtime.SchedulerConfigName)
-		err = c.CopySchedulerConfig(conf.KubeSchedulerConfig, schedulerConfigPath, inClusterKubeconfig)
+		err = c.CopySchedulerConfig(conf.KubeSchedulerConfig, schedulerConfigPath, env.schedulerConfigPath)
 		if err != nil {
 			return err
 		}
 	}
 
-	configPath := c.GetWorkdirPath(runtime.ConfigName)
+	kubeApiserverTracingConfigPath := ""
+	if conf.JaegerPort != 0 {
+		kubeApiserverTracingConfigData, err := k8s.BuildKubeApiserverTracingConfig(k8s.BuildKubeApiserverTracingConfigParam{
+			Endpoint: conf.BindAddress + ":4317",
+		})
+		if err != nil {
+			return fmt.Errorf("failed to generate kubeApiserverTracingConfig yaml: %w", err)
+		}
+		kubeApiserverTracingConfigPath = c.GetWorkdirPath(runtime.ApiserverTracingConfig)
+
+		err = c.WriteFile(kubeApiserverTracingConfigPath, []byte(kubeApiserverTracingConfigData))
+		if err != nil {
+			return fmt.Errorf("failed to write kubeApiserverTracingConfig yaml: %w", err)
+		}
+	}
+
+	var prometheusPatches internalversion.ComponentPatches
+	if conf.PrometheusPort != 0 {
+		prometheusPatches = runtime.GetComponentPatches(env.kwokctlConfig, consts.ComponentPrometheus)
+		prometheusConfigPath := c.GetWorkdirPath(runtime.Prometheus)
+
+		prometheusPatches.ExtraVolumes = append(prometheusPatches.ExtraVolumes, internalversion.Volume{
+			Name:      "prometheus-config",
+			HostPath:  prometheusConfigPath,
+			MountPath: env.prometheusConfigPath,
+		})
+	}
 
 	kubeVersion, err := version.ParseVersion(conf.KubeVersion)
 	if err != nil {
 		return err
 	}
 
-	etcdComponentPatches := runtime.GetComponentPatches(config, "etcd")
-	kubeApiserverComponentPatches := runtime.GetComponentPatches(config, "kube-apiserver")
-	kubeSchedulerComponentPatches := runtime.GetComponentPatches(config, "kube-scheduler")
-	kubeControllerManagerComponentPatches := runtime.GetComponentPatches(config, "kube-controller-manager")
-	kwokControllerComponentPatches := runtime.GetComponentPatches(config, "kwok-controller")
+	etcdComponentPatches := runtime.GetComponentPatches(env.kwokctlConfig, consts.ComponentEtcd)
+
+	kubeApiserverComponentPatches := runtime.GetComponentPatches(env.kwokctlConfig, consts.ComponentKubeApiserver)
+	kubeSchedulerComponentPatches := runtime.GetComponentPatches(env.kwokctlConfig, consts.ComponentKubeScheduler)
+	kubeControllerManagerComponentPatches := runtime.GetComponentPatches(env.kwokctlConfig, consts.ComponentKubeControllerManager)
+	kwokControllerComponentPatches := runtime.GetComponentPatches(env.kwokctlConfig, consts.ComponentKwokController)
+	for _, patch := range env.kwokctlConfig.ComponentsPatches {
+		switch patch.Name {
+		case consts.ComponentEtcd:
+			args := filterDuplicatedExtraArgs(ctx, etcdComponentPatches.ExtraArgs, patch.ExtraArgs)
+			etcdComponentPatches.ExtraArgs = args
+		case consts.ComponentKubeApiserver:
+			args := filterDuplicatedExtraArgs(ctx, kubeApiserverComponentPatches.ExtraArgs, patch.ExtraArgs)
+			kubeApiserverComponentPatches.ExtraArgs = args
+		case consts.ComponentKubeScheduler:
+			args := filterDuplicatedExtraArgs(ctx, kubeSchedulerComponentPatches.ExtraArgs, patch.ExtraArgs)
+			kubeSchedulerComponentPatches.ExtraArgs = args
+		case consts.ComponentKubeControllerManager:
+			args := filterDuplicatedExtraArgs(ctx, kubeControllerManagerComponentPatches.ExtraArgs, patch.ExtraArgs)
+			kubeControllerManagerComponentPatches.ExtraArgs = args
+		case consts.ComponentKwokController:
+			args := filterDuplicatedExtraArgs(ctx, kwokControllerComponentPatches.ExtraArgs, patch.ExtraArgs)
+			kwokControllerComponentPatches.ExtraArgs = args
+		}
+	}
 	extraLogVolumes := runtime.GetLogVolumes(ctx)
 	kwokControllerExtraVolumes := kwokControllerComponentPatches.ExtraVolumes
 	kwokControllerExtraVolumes = append(kwokControllerExtraVolumes, extraLogVolumes...)
@@ -160,16 +453,20 @@ func (c *Cluster) Install(ctx context.Context) error {
 	kindYaml, err := BuildKind(BuildKindConfig{
 		BindAddress:                   conf.BindAddress,
 		KubeApiserverPort:             conf.KubeApiserverPort,
+		KubeApiserverInsecurePort:     conf.KubeApiserverInsecurePort,
 		EtcdPort:                      conf.EtcdPort,
+		JaegerPort:                    conf.JaegerPort,
+		DashboardPort:                 conf.DashboardPort,
 		PrometheusPort:                conf.PrometheusPort,
 		KwokControllerPort:            conf.KwokControllerPort,
 		FeatureGates:                  featureGates,
 		RuntimeConfig:                 runtimeConfig,
-		AuditPolicy:                   auditPolicyPath,
-		AuditLog:                      auditLogPath,
+		AuditPolicy:                   env.auditPolicyPath,
+		AuditLog:                      env.auditLogPath,
 		SchedulerConfig:               schedulerConfigPath,
-		ConfigPath:                    configPath,
-		Verbosity:                     verbosity,
+		TracingConfigPath:             kubeApiserverTracingConfigPath,
+		Workdir:                       c.Workdir(),
+		Verbosity:                     env.verbosity,
 		EtcdExtraArgs:                 etcdComponentPatches.ExtraArgs,
 		EtcdExtraVolumes:              etcdComponentPatches.ExtraVolumes,
 		ApiserverExtraArgs:            kubeApiserverComponentPatches.ExtraArgs,
@@ -179,9 +476,10 @@ func (c *Cluster) Install(ctx context.Context) error {
 		ControllerManagerExtraArgs:    kubeControllerManagerComponentPatches.ExtraArgs,
 		ControllerManagerExtraVolumes: kubeControllerManagerComponentPatches.ExtraVolumes,
 		KwokControllerExtraVolumes:    kwokControllerExtraVolumes,
-		KwokControllerExtraExtraEnvs:  kwokControllerComponentPatches.ExtraEnvs,
+		PrometheusExtraVolumes:        prometheusPatches.ExtraVolumes,
 		DisableQPSLimits:              conf.DisableQPSLimits,
 		KubeVersion:                   kubeVersion,
+		EtcdQuotaBackendSize:          conf.EtcdQuotaBackendSize,
 	})
 	if err != nil {
 		return err
@@ -191,57 +489,483 @@ func (c *Cluster) Install(ctx context.Context) error {
 		return fmt.Errorf("failed to write %s: %w", runtime.KindName, err)
 	}
 
-	kwokControllerPod, err := BuildKwokControllerPod(BuildKwokControllerPodConfig{
-		KwokControllerImage:      conf.KwokControllerImage,
-		Name:                     c.Name(),
-		Verbosity:                verbosity,
-		NodeLeaseDurationSeconds: 40,
-		ExtraArgs:                kwokControllerComponentPatches.ExtraArgs,
-		ExtraVolumes:             kwokControllerExtraVolumes,
-		ExtraEnvs:                kwokControllerComponentPatches.ExtraEnvs,
+	return nil
+}
+
+func filterDuplicatedExtraArgs(ctx context.Context, extraArgs, passedExtraArgs []internalversion.ExtraArgs) []internalversion.ExtraArgs {
+	logger := log.FromContext(ctx)
+	extraArgsMap := make(map[string]internalversion.ExtraArgs)
+	for _, args := range extraArgs {
+		extraArgsMap[args.Key] = args
+	}
+	for _, args := range passedExtraArgs {
+		if _, ok := extraArgsMap[args.Key]; ok {
+			logger.Warn("duplicated extraArgs and will be overwritten", "key", args.Key, "value", args.Value)
+		}
+		extraArgsMap[args.Key] = args
+	}
+	result := make([]internalversion.ExtraArgs, 0, len(extraArgsMap))
+	for _, args := range extraArgsMap {
+		result = append(result, args)
+	}
+	return result
+}
+
+func (c *Cluster) addEtcd(_ context.Context, env *env) (err error) {
+	env.kwokctlConfig.Components = append(env.kwokctlConfig.Components, internalversion.Component{
+		Name: consts.ComponentEtcd,
+		Metric: &internalversion.ComponentMetric{
+			Scheme:             "https",
+			Host:               "127.0.0.1:2379",
+			Path:               "/metrics",
+			CertPath:           "/etc/kubernetes/pki/apiserver-etcd-client.crt",
+			KeyPath:            "/etc/kubernetes/pki/apiserver-etcd-client.key",
+			InsecureSkipVerify: true,
+		},
+	})
+	return nil
+}
+
+func (c *Cluster) addKubeApiserver(_ context.Context, env *env) (err error) {
+	env.kwokctlConfig.Components = append(env.kwokctlConfig.Components, internalversion.Component{
+		Name: consts.ComponentKubeApiserver,
+		Metric: &internalversion.ComponentMetric{
+			Scheme:             "https",
+			Host:               "127.0.0.1:6443",
+			Path:               "/metrics",
+			CertPath:           "/etc/kubernetes/pki/admin.crt",
+			KeyPath:            "/etc/kubernetes/pki/admin.key",
+			InsecureSkipVerify: true,
+		},
+	})
+	return nil
+}
+
+func (c *Cluster) addKubectlProxy(ctx context.Context, env *env) (err error) {
+	if !slices.Contains(env.components, consts.ComponentKubeApiserverInsecureProxy) {
+		return nil
+	}
+
+	conf := &env.kwokctlConfig.Options
+
+	// Configure the kubectl
+	err = c.EnsureImage(ctx, c.runtime, conf.KubectlImage)
+	if err != nil {
+		return err
+	}
+
+	kubectlProxyComponent, err := components.BuildKubectlProxyComponent(components.BuildKubectlProxyComponentConfig{
+		Runtime:        conf.Runtime,
+		ProjectName:    c.Name(),
+		Workdir:        env.workdir,
+		Image:          conf.KubectlImage,
+		BindAddress:    net.PublicAddress,
+		Port:           conf.KubeApiserverInsecurePort,
+		KubeconfigPath: env.inClusterOnHostKubeconfigPath,
+		CaCertPath:     env.caCertPath,
+		AdminCertPath:  env.adminCertPath,
+		AdminKeyPath:   env.adminKeyPath,
+		Verbosity:      env.verbosity,
 	})
 	if err != nil {
 		return err
 	}
-	err = c.WriteFile(c.GetWorkdirPath(runtime.KwokPod), []byte(kwokControllerPod))
+
+	runtime.ApplyComponentPatches(ctx, &kubectlProxyComponent, env.kwokctlConfig.ComponentsPatches)
+
+	dashboardPod, err := yaml.Marshal(components.ConvertToPod(kubectlProxyComponent))
 	if err != nil {
-		return fmt.Errorf("failed to write %s: %w", runtime.KwokPod, err)
+		return fmt.Errorf("failed to marshal kubectl proxy pod: %w", err)
+	}
+	err = c.WriteFile(path.Join(c.GetWorkdirPath(runtime.ManifestsName), consts.ComponentKubeApiserverInsecureProxy+".yaml"), dashboardPod)
+	if err != nil {
+		return fmt.Errorf("failed to write: %w", err)
 	}
 
-	if conf.PrometheusPort != 0 {
-		prometheusPatches := runtime.GetComponentPatches(config, "prometheus")
-		prometheusConf := BuildPrometheusDeploymentConfig{
-			PrometheusImage: conf.PrometheusImage,
-			Name:            c.Name(),
-			ExtraArgs:       prometheusPatches.ExtraArgs,
-			ExtraVolumes:    prometheusPatches.ExtraVolumes,
-			ExtraEnvs:       prometheusPatches.ExtraEnvs,
-		}
-		if verbosity != log.LevelInfo {
-			prometheusConf.LogLevel = log.ToLogSeverityLevel(verbosity)
-		}
-		prometheusDeploy, err := BuildPrometheusDeployment(prometheusConf)
-		if err != nil {
-			return err
-		}
-		err = c.WriteFile(c.GetWorkdirPath(runtime.PrometheusDeploy), []byte(prometheusDeploy))
-		if err != nil {
-			return fmt.Errorf("failed to write %s: %w", runtime.PrometheusDeploy, err)
-		}
+	env.kwokctlConfig.Components = append(env.kwokctlConfig.Components, kubectlProxyComponent)
+	return nil
+}
+
+func (c *Cluster) addKubeControllerManager(_ context.Context, env *env) (err error) {
+	if !slices.Contains(env.components, consts.ComponentKubeControllerManager) {
+		return nil
 	}
 
-	images := []string{
-		conf.KindNodeImage,
-		conf.KwokControllerImage,
+	env.kwokctlConfig.Components = append(env.kwokctlConfig.Components, internalversion.Component{
+		Name: consts.ComponentKubeControllerManager,
+		Metric: &internalversion.ComponentMetric{
+			Scheme:             "https",
+			Host:               "127.0.0.1:10257",
+			Path:               "/metrics",
+			CertPath:           "/etc/kubernetes/pki/admin.crt",
+			KeyPath:            "/etc/kubernetes/pki/admin.key",
+			InsecureSkipVerify: true,
+		},
+	})
+	return nil
+}
+
+func (c *Cluster) addKubeScheduler(_ context.Context, env *env) (err error) {
+	if !slices.Contains(env.components, consts.ComponentKubeScheduler) {
+		return nil
 	}
-	if conf.PrometheusPort != 0 {
-		images = append(images, conf.PrometheusImage)
+
+	env.kwokctlConfig.Components = append(env.kwokctlConfig.Components, internalversion.Component{
+		Name: consts.ComponentKubeScheduler,
+		Metric: &internalversion.ComponentMetric{
+			Scheme:             "https",
+			Host:               "127.0.0.1:10259",
+			Path:               "/metrics",
+			CertPath:           "/etc/kubernetes/pki/admin.crt",
+			KeyPath:            "/etc/kubernetes/pki/admin.key",
+			InsecureSkipVerify: true,
+		},
+	})
+	return nil
+}
+
+func (c *Cluster) addKwokController(ctx context.Context, env *env) (err error) {
+	if !slices.Contains(env.components, consts.ComponentKwokController) {
+		return nil
 	}
-	err = c.PullImages(ctx, c.runtime, images, conf.QuietPull)
+
+	conf := &env.kwokctlConfig.Options
+	err = c.EnsureImage(ctx, c.runtime, conf.KwokControllerImage)
 	if err != nil {
 		return err
 	}
 
+	// Configure the kwok-controller
+	kwokControllerVersion, err := c.ParseVersionFromImage(ctx, c.runtime, conf.KwokControllerImage, "kwok")
+	if err != nil {
+		return err
+	}
+
+	logVolumes := runtime.GetLogVolumes(ctx)
+	logVolumes = slices.Map(logVolumes, func(v internalversion.Volume) internalversion.Volume {
+		v.HostPath = path.Join("/var/components/controller", v.HostPath)
+		return v
+	})
+
+	otlpGrpcAddress := ""
+	if conf.JaegerPort != 0 {
+		otlpGrpcAddress = net.LocalAddress + ":4317"
+	}
+
+	kwokControllerComponent := components.BuildKwokControllerComponent(components.BuildKwokControllerComponentConfig{
+		Runtime:                           conf.Runtime,
+		ProjectName:                       c.Name(),
+		Workdir:                           env.workdir,
+		Image:                             conf.KwokControllerImage,
+		Version:                           kwokControllerVersion,
+		BindAddress:                       net.PublicAddress,
+		Port:                              conf.KwokControllerPort,
+		ConfigPath:                        env.kwokConfigPath,
+		KubeconfigPath:                    env.inClusterOnHostKubeconfigPath,
+		CaCertPath:                        env.caCertPath,
+		AdminCertPath:                     env.adminCertPath,
+		AdminKeyPath:                      env.adminKeyPath,
+		NodeIP:                            "$(POD_IP)",
+		NodeName:                          "kwok-controller.kube-system.svc",
+		ManageNodesWithAnnotationSelector: "kwok.x-k8s.io/node=fake",
+		Verbosity:                         env.verbosity,
+		NodeLeaseDurationSeconds:          40,
+		EnableCRDs:                        conf.EnableCRDs,
+		OtlpGrpcAddress:                   otlpGrpcAddress,
+	})
+	kwokControllerComponent.Volumes = append(kwokControllerComponent.Volumes, logVolumes...)
+
+	runtime.ApplyComponentPatches(ctx, &kwokControllerComponent, env.kwokctlConfig.ComponentsPatches)
+
+	pod := components.ConvertToPod(kwokControllerComponent)
+	pod.Spec.Containers[0].Env = append(pod.Spec.Containers[0].Env, corev1.EnvVar{
+		Name: "POD_IP",
+		ValueFrom: &corev1.EnvVarSource{
+			FieldRef: &corev1.ObjectFieldSelector{
+				FieldPath: "status.podIP",
+			},
+		},
+	})
+	kwokControllerPod, err := yaml.Marshal(pod)
+	if err != nil {
+		return fmt.Errorf("failed to marshal kwok controller pod: %w", err)
+	}
+	err = c.WriteFile(path.Join(c.GetWorkdirPath(runtime.ManifestsName), consts.ComponentKwokController+".yaml"), kwokControllerPod)
+	if err != nil {
+		return fmt.Errorf("failed to write: %w", err)
+	}
+
+	env.kwokctlConfig.Components = append(env.kwokctlConfig.Components, kwokControllerComponent)
+	return nil
+}
+
+func (c *Cluster) addDashboard(ctx context.Context, env *env) (err error) {
+	if !slices.Contains(env.components, consts.ComponentDashboard) {
+		return nil
+	}
+
+	conf := &env.kwokctlConfig.Options
+
+	err = c.EnsureImage(ctx, c.runtime, conf.DashboardImage)
+	if err != nil {
+		return err
+	}
+	dashboardVersion, err := c.ParseVersionFromImage(ctx, c.runtime, conf.DashboardImage, "")
+	if err != nil {
+		return err
+	}
+
+	enableMetricsServer := slices.Contains(env.components, consts.ComponentMetricsServer)
+
+	dashboardComponent, err := components.BuildDashboardComponent(components.BuildDashboardComponentConfig{
+		Runtime:        conf.Runtime,
+		Workdir:        env.workdir,
+		Image:          conf.DashboardImage,
+		Version:        dashboardVersion,
+		BindAddress:    net.PublicAddress,
+		KubeconfigPath: env.inClusterOnHostKubeconfigPath,
+		CaCertPath:     env.caCertPath,
+		AdminCertPath:  env.adminCertPath,
+		AdminKeyPath:   env.adminKeyPath,
+		Port:           8080,
+		Banner:         fmt.Sprintf("Welcome to %s", c.Name()),
+		EnableMetrics:  enableMetricsServer,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to build dashboard component: %w", err)
+	}
+
+	runtime.ApplyComponentPatches(ctx, &dashboardComponent, env.kwokctlConfig.ComponentsPatches)
+
+	dashboardPod, err := yaml.Marshal(components.ConvertToPod(dashboardComponent))
+	if err != nil {
+		return fmt.Errorf("failed to marshal dashboard pod: %w", err)
+	}
+	err = c.WriteFile(path.Join(c.GetWorkdirPath(runtime.ManifestsName), consts.ComponentDashboard+".yaml"), dashboardPod)
+	if err != nil {
+		return fmt.Errorf("failed to write: %w", err)
+	}
+	env.kwokctlConfig.Components = append(env.kwokctlConfig.Components, dashboardComponent)
+
+	if enableMetricsServer {
+		err = c.EnsureImage(ctx, c.runtime, conf.DashboardMetricsScraperImage)
+		if err != nil {
+			return err
+		}
+
+		dashboardMetricsScraperComponent, err := components.BuildDashboardMetricsScraperComponent(components.BuildDashboardMetricsScraperComponentConfig{
+			Runtime:        conf.Runtime,
+			Workdir:        env.workdir,
+			Image:          conf.DashboardMetricsScraperImage,
+			KubeconfigPath: env.inClusterOnHostKubeconfigPath,
+			CaCertPath:     env.caCertPath,
+			AdminCertPath:  env.adminCertPath,
+			AdminKeyPath:   env.adminKeyPath,
+		})
+		if err != nil {
+			return err
+		}
+		dashboardMetricsScraperPod, err := yaml.Marshal(components.ConvertToPod(dashboardMetricsScraperComponent))
+		if err != nil {
+			return fmt.Errorf("failed to marshal dashboard metrics scraper pod: %w", err)
+		}
+		err = c.WriteFile(path.Join(c.GetWorkdirPath(runtime.ManifestsName), consts.ComponentDashboardMetricsScraper+".yaml"), dashboardMetricsScraperPod)
+		if err != nil {
+			return fmt.Errorf("failed to write: %w", err)
+		}
+		env.kwokctlConfig.Components = append(env.kwokctlConfig.Components, dashboardMetricsScraperComponent)
+	}
+	return nil
+}
+
+func (c *Cluster) addMetricsServer(ctx context.Context, env *env) (err error) {
+	if !slices.Contains(env.components, consts.ComponentMetricsServer) {
+		return nil
+	}
+
+	conf := &env.kwokctlConfig.Options
+	err = c.EnsureImage(ctx, c.runtime, conf.MetricsServerImage)
+	if err != nil {
+		return err
+	}
+	metricsServerVersion, err := c.ParseVersionFromImage(ctx, c.runtime, conf.MetricsServerImage, "")
+	if err != nil {
+		return err
+	}
+
+	metricsServerComponent, err := components.BuildMetricsServerComponent(components.BuildMetricsServerComponentConfig{
+		Runtime:        conf.Runtime,
+		ProjectName:    c.Name(),
+		Workdir:        env.workdir,
+		Image:          conf.MetricsServerImage,
+		Version:        metricsServerVersion,
+		BindAddress:    net.PublicAddress,
+		Port:           443,
+		CaCertPath:     env.caCertPath,
+		AdminCertPath:  env.adminCertPath,
+		AdminKeyPath:   env.adminKeyPath,
+		KubeconfigPath: env.inClusterOnHostKubeconfigPath,
+		Verbosity:      env.verbosity,
+	})
+	if err != nil {
+		return err
+	}
+
+	metricsServerPod, err := yaml.Marshal(components.ConvertToPod(metricsServerComponent))
+	if err != nil {
+		return fmt.Errorf("failed to marshal metrics server pod: %w", err)
+	}
+	err = c.WriteFile(path.Join(c.GetWorkdirPath(runtime.ManifestsName), consts.ComponentMetricsServer+".yaml"), metricsServerPod)
+	if err != nil {
+		return fmt.Errorf("failed to write: %w", err)
+	}
+
+	env.kwokctlConfig.Components = append(env.kwokctlConfig.Components, metricsServerComponent)
+
+	return nil
+}
+
+func (c *Cluster) setupPrometheusConfig(_ context.Context, env *env) (err error) {
+	if !slices.Contains(env.components, consts.ComponentPrometheus) {
+		return nil
+	}
+
+	// Configure the prometheus
+	prometheusData, err := components.BuildPrometheus(components.BuildPrometheusConfig{
+		Components: env.kwokctlConfig.Components,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to generate prometheus yaml: %w", err)
+	}
+	prometheusConfigPath := c.GetWorkdirPath(runtime.Prometheus)
+	err = c.WriteFile(prometheusConfigPath, []byte(prometheusData))
+	if err != nil {
+		return fmt.Errorf("failed to write prometheus yaml: %w", err)
+	}
+	return nil
+}
+
+func (c *Cluster) addPrometheus(ctx context.Context, env *env) (err error) {
+	if !slices.Contains(env.components, consts.ComponentPrometheus) {
+		return nil
+	}
+
+	conf := &env.kwokctlConfig.Options
+
+	err = c.EnsureImage(ctx, c.runtime, conf.PrometheusImage)
+	if err != nil {
+		return err
+	}
+	prometheusVersion, err := c.ParseVersionFromImage(ctx, c.runtime, conf.PrometheusImage, "")
+	if err != nil {
+		return err
+	}
+
+	prometheusComponent, err := components.BuildPrometheusComponent(components.BuildPrometheusComponentConfig{
+		Runtime:                      conf.Runtime,
+		Workdir:                      env.workdir,
+		Image:                        conf.PrometheusImage,
+		Version:                      prometheusVersion,
+		BindAddress:                  net.PublicAddress,
+		Port:                         9090,
+		ConfigPath:                   "/var/components/prometheus/etc/prometheus/prometheus.yaml",
+		AdminCertPath:                env.adminCertPath,
+		AdminKeyPath:                 env.adminKeyPath,
+		Verbosity:                    env.verbosity,
+		DisableKubeControllerManager: !slices.Contains(env.components, consts.ComponentKubeControllerManager),
+		DisableKubeScheduler:         !slices.Contains(env.components, consts.ComponentKubeScheduler),
+	})
+	if err != nil {
+		return err
+	}
+
+	prometheusComponent.Volumes = append(prometheusComponent.Volumes,
+		internalversion.Volume{
+			HostPath:  "/etc/kubernetes/pki/apiserver-etcd-client.crt",
+			MountPath: "/etc/kubernetes/pki/apiserver-etcd-client.crt",
+			ReadOnly:  true,
+		},
+		internalversion.Volume{
+			HostPath:  "/etc/kubernetes/pki/apiserver-etcd-client.key",
+			MountPath: "/etc/kubernetes/pki/apiserver-etcd-client.key",
+			ReadOnly:  true,
+		},
+	)
+
+	runtime.ApplyComponentPatches(ctx, &prometheusComponent, env.kwokctlConfig.ComponentsPatches)
+
+	prometheusPod, err := yaml.Marshal(components.ConvertToPod(prometheusComponent))
+	if err != nil {
+		return fmt.Errorf("failed to marshal prometheus pod: %w", err)
+	}
+	err = c.WriteFile(path.Join(c.GetWorkdirPath(runtime.ManifestsName), consts.ComponentPrometheus+".yaml"), prometheusPod)
+	if err != nil {
+		return fmt.Errorf("failed to write: %w", err)
+	}
+
+	env.kwokctlConfig.Components = append(env.kwokctlConfig.Components, prometheusComponent)
+	return nil
+}
+
+func (c *Cluster) addJaeger(ctx context.Context, env *env) (err error) {
+	if !slices.Contains(env.components, consts.ComponentJaeger) {
+		return nil
+	}
+
+	conf := &env.kwokctlConfig.Options
+
+	if conf.JaegerPort != 0 {
+		err = c.EnsureImage(ctx, c.runtime, conf.JaegerImage)
+		if err != nil {
+			return err
+		}
+		jaegerVersion, err := c.ParseVersionFromImage(ctx, c.runtime, conf.JaegerImage, "")
+		if err != nil {
+			return err
+		}
+
+		jaegerComponent, err := components.BuildJaegerComponent(components.BuildJaegerComponentConfig{
+			Runtime:      conf.Runtime,
+			Workdir:      env.workdir,
+			Image:        conf.JaegerImage,
+			Version:      jaegerVersion,
+			BindAddress:  net.PublicAddress,
+			Port:         16686,
+			OtlpGrpcPort: 4317,
+			Verbosity:    env.verbosity,
+		})
+		if err != nil {
+			return err
+		}
+
+		runtime.ApplyComponentPatches(ctx, &jaegerComponent, env.kwokctlConfig.ComponentsPatches)
+
+		jaegerPod, err := yaml.Marshal(components.ConvertToPod(jaegerComponent))
+		if err != nil {
+			return fmt.Errorf("failed to marshal jaeger pod: %w", err)
+		}
+		err = c.WriteFile(path.Join(c.GetWorkdirPath(runtime.ManifestsName), consts.ComponentJaeger+".yaml"), jaegerPod)
+		if err != nil {
+			return fmt.Errorf("failed to write: %w", err)
+		}
+
+		env.kwokctlConfig.Components = append(env.kwokctlConfig.Components, jaegerComponent)
+	}
+	return nil
+}
+
+func (c *Cluster) preInstall(_ context.Context, env *env) error {
+	for i, patch := range env.kwokctlConfig.ComponentsPatches {
+		if len(patch.ExtraVolumes) == 0 {
+			continue
+		}
+		volumes, err := runtime.ExpandVolumesHostPaths(patch.ExtraVolumes)
+		if err != nil {
+			return fmt.Errorf("failed to expand host volumes for %q component: %w", patch.Name, err)
+		}
+
+		env.kwokctlConfig.ComponentsPatches[i].ExtraVolumes = volumes
+	}
 	return nil
 }
 
@@ -253,40 +977,24 @@ func (c *Cluster) Up(ctx context.Context) error {
 	}
 	conf := &config.Options
 
-	config.Components = append(config.Components,
-		internalversion.Component{
-			Name: "etcd",
-		},
-		internalversion.Component{
-			Name: "kube-apiserver",
-		},
-		internalversion.Component{
-			Name: "kwok-controller",
-		},
-	)
+	logger := log.FromContext(ctx)
 
-	if conf.PrometheusPort != 0 {
-		config.Components = append(config.Components,
-			internalversion.Component{
-				Name: "prometheus",
-			},
-		)
+	if !slices.Contains(config.Options.Components, consts.ComponentKubeScheduler) {
+		defer func() {
+			err := c.StopComponent(ctx, consts.ComponentKubeScheduler)
+			if err != nil {
+				logger.Error("Failed to disable kube-scheduler", err)
+			}
+		}()
 	}
 
-	if !conf.DisableKubeScheduler {
-		config.Components = append(config.Components,
-			internalversion.Component{
-				Name: "kube-scheduler",
-			},
-		)
-	}
-
-	if !conf.DisableKubeControllerManager {
-		config.Components = append(config.Components,
-			internalversion.Component{
-				Name: "kube-controller-manager",
-			},
-		)
+	if !slices.Contains(config.Options.Components, consts.ComponentKubeControllerManager) {
+		defer func() {
+			err := c.StopComponent(ctx, consts.ComponentKubeControllerManager)
+			if err != nil {
+				logger.Error("Failed to disable kube-controller-manager", err)
+			}
+		}()
 	}
 
 	err = c.SetConfig(ctx, config)
@@ -300,9 +1008,12 @@ func (c *Cluster) Up(ctx context.Context) error {
 		return fmt.Errorf("failed to save config: %w", err)
 	}
 
-	logger := log.FromContext(ctx)
-
 	kindPath, err := c.preDownloadKind(ctx)
+	if err != nil {
+		return err
+	}
+
+	images, err := c.listAllImages(ctx)
 	if err != nil {
 		return err
 	}
@@ -330,22 +1041,13 @@ func (c *Cluster) Up(ctx context.Context) error {
 		return err
 	}
 
-	// TODO: remove this when kind support set server
-	err = c.fillKubeconfigContextServer(conf.BindAddress)
+	err = c.loadImages(ctx, kindPath, images, conf.CacheDir)
 	if err != nil {
 		return err
 	}
 
-	images := []string{conf.KwokControllerImage}
-	if conf.PrometheusPort != 0 {
-		images = append(images, conf.PrometheusImage)
-	}
-
-	if c.runtime == consts.RuntimeTypeDocker {
-		err = c.loadDockerImages(ctx, kindPath, c.Name(), images)
-	} else {
-		err = c.loadArchiveImages(ctx, kindPath, c.Name(), images, c.runtime, conf.CacheDir)
-	}
+	// TODO: remove this when kind support set server
+	err = c.fillKubeconfigContextServer(conf.BindAddress)
 	if err != nil {
 		return err
 	}
@@ -363,55 +1065,35 @@ func (c *Cluster) Up(ctx context.Context) error {
 		return err
 	}
 
-	kindName := c.getClusterName()
-	err = c.Exec(ctx, c.runtime, "cp", c.GetWorkdirPath(runtime.KwokPod), kindName+":/etc/kubernetes/manifests/kwok-controller.yaml")
-	if err != nil {
-		return err
-	}
-
-	// Copy ca.crt and ca.key to host's workdir
-	pkiPath := c.GetWorkdirPath(runtime.PkiName)
-	err = c.MkdirAll(pkiPath)
-	if err != nil {
-		return err
-	}
-	err = c.Exec(ctx, c.runtime, "cp", kindName+":/etc/kubernetes/pki/ca.crt", path.Join(pkiPath, "ca.crt"))
-	if err != nil {
-		return err
-	}
-	err = c.Exec(ctx, c.runtime, "cp", kindName+":/etc/kubernetes/pki/ca.key", path.Join(pkiPath, "ca.key"))
-	if err != nil {
-		return err
-	}
-
-	if conf.PrometheusPort != 0 {
-		err = c.Kubectl(exec.WithAllWriteToErrOut(ctx), "apply", "-f", c.GetWorkdirPath(runtime.PrometheusDeploy))
-		if err != nil {
-			return err
-		}
-	}
-
 	// Cordoning the node to prevent fake pods from being scheduled on it
 	err = c.Kubectl(ctx, "cordon", c.getClusterName())
 	if err != nil {
 		logger.Error("Failed cordon node", err)
 	}
 
-	if conf.DisableKubeScheduler {
-		err := c.StopComponent(ctx, "kube-scheduler")
-		if err != nil {
-			logger.Error("Failed to disable kube-scheduler", err)
-		}
-	}
-
-	if conf.DisableKubeControllerManager {
-		err := c.StopComponent(ctx, "kube-controller-manager")
-		if err != nil {
-			logger.Error("Failed to disable kube-controller-manager", err)
-		}
+	err = c.Exec(ctx, c.runtime, "exec", c.getClusterName(), "chmod", "-R", "+r", "/etc/kubernetes/pki")
+	if err != nil {
+		logger.Error("Failed to chmod pki", err)
 	}
 
 	return nil
+}
+
+func (c *Cluster) listAllImages(ctx context.Context) ([]string, error) {
+	config, err := c.Config(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	images := []string{}
+	for _, component := range config.Components {
+		if component.Image == "" {
+			continue
+		}
+		images = append(images, component.Image)
+	}
+
+	return images, nil
 }
 
 // loadDockerImages loads docker images into the cluster.
@@ -464,6 +1146,19 @@ func (c *Cluster) loadArchiveImages(ctx context.Context, command string, kindClu
 	return nil
 }
 
+func (c *Cluster) loadImages(ctx context.Context, kindPath string, images []string, cacheDir string) error {
+	var err error
+	if c.runtime == consts.RuntimeTypeDocker {
+		err = c.loadDockerImages(ctx, kindPath, c.Name(), images)
+	} else {
+		err = c.loadArchiveImages(ctx, kindPath, c.Name(), images, c.runtime, cacheDir)
+	}
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
 // WaitReady waits for the cluster to be ready.
 func (c *Cluster) WaitReady(ctx context.Context, timeout time.Duration) error {
 	if c.IsDryRun() {
@@ -498,6 +1193,21 @@ func (c *Cluster) WaitReady(ctx context.Context, timeout time.Duration) error {
 	return nil
 }
 
+// InspectComponent returns the status of the component
+func (c *Cluster) InspectComponent(ctx context.Context, name string) (runtime.ComponentStatus, error) {
+	ready, running, _, err := c.inspectComponent(ctx, name)
+	if err != nil {
+		return runtime.ComponentStatusUnknown, err
+	}
+	if !running {
+		return runtime.ComponentStatusStopped, nil
+	}
+	if !ready {
+		return runtime.ComponentStatusRunning, nil
+	}
+	return runtime.ComponentStatusReady, nil
+}
+
 // Ready returns true if the cluster is ready
 func (c *Cluster) Ready(ctx context.Context) (bool, error) {
 	ok, err := c.Cluster.Ready(ctx)
@@ -508,32 +1218,17 @@ func (c *Cluster) Ready(ctx context.Context) (bool, error) {
 		return false, nil
 	}
 
-	out := bytes.NewBuffer(nil)
-	err = c.KubectlInCluster(exec.WithWriteTo(ctx, out), "get", "pod", "--namespace=kube-system", "--field-selector=status.phase!=Running", "--output=json")
+	config, err := c.Config(ctx)
 	if err != nil {
 		return false, err
 	}
 
-	var data corev1.PodList
-	err = json.Unmarshal(out.Bytes(), &data)
-	if err != nil {
-		return false, err
-	}
-
-	if len(data.Items) != 0 {
-		logger := log.FromContext(ctx)
-		logger.Debug("Components not all running",
-			"components", slices.Map(data.Items, func(item corev1.Pod) interface{} {
-				return struct {
-					Pod   string
-					Phase string
-				}{
-					Pod:   log.KObj(&item).String(),
-					Phase: string(item.Status.Phase),
-				}
-			}),
-		)
-		return false, nil
+	// TODO: Only the necessary components are checked for readiness.
+	for _, component := range config.Components {
+		s, _ := c.InspectComponent(ctx, component.Name)
+		if s != runtime.ComponentStatusReady {
+			return false, nil
+		}
 	}
 	return true, nil
 }
@@ -572,18 +1267,22 @@ func (c *Cluster) Stop(ctx context.Context) error {
 	return nil
 }
 
-var importantComponents = map[string]struct{}{
-	"etcd":           {},
-	"kube-apiserver": {},
+var startImportantComponents = map[string]struct{}{
+	consts.ComponentEtcd: {},
+}
+
+var stopImportantComponents = map[string]struct{}{
+	consts.ComponentEtcd:          {},
+	consts.ComponentKubeApiserver: {},
 }
 
 // StartComponent starts a component in the cluster
 func (c *Cluster) StartComponent(ctx context.Context, name string) error {
 	logger := log.FromContext(ctx)
 	logger = logger.With("component", name)
-	if _, important := importantComponents[name]; !important {
+	if _, important := startImportantComponents[name]; !important {
 		if !c.IsDryRun() {
-			if _, exist, err := c.inspectComponent(ctx, name); err != nil {
+			if _, _, exist, err := c.inspectComponent(ctx, name); err != nil {
 				return err
 			} else if exist {
 				logger.Debug("Component already started")
@@ -597,6 +1296,9 @@ func (c *Cluster) StartComponent(ctx context.Context, name string) error {
 	if err != nil {
 		return err
 	}
+	if _, important := startImportantComponents[name]; important {
+		return nil
+	}
 	if c.IsDryRun() {
 		return nil
 	}
@@ -607,9 +1309,9 @@ func (c *Cluster) StartComponent(ctx context.Context, name string) error {
 func (c *Cluster) StopComponent(ctx context.Context, name string) error {
 	logger := log.FromContext(ctx)
 	logger = logger.With("component", name)
-	if _, important := importantComponents[name]; !important {
+	if _, important := stopImportantComponents[name]; !important {
 		if !c.IsDryRun() {
-			if _, exist, err := c.inspectComponent(ctx, name); err != nil {
+			if _, _, exist, err := c.inspectComponent(ctx, name); err != nil {
 				return err
 			} else if !exist {
 				logger.Debug("Component already stopped")
@@ -624,7 +1326,7 @@ func (c *Cluster) StopComponent(ctx context.Context, name string) error {
 		return err
 	}
 	// Once etcd and kube-apiserver are stopped, the cluster will go down
-	if _, important := importantComponents[name]; important {
+	if _, important := stopImportantComponents[name]; important {
 		return nil
 	}
 	if c.IsDryRun() {
@@ -639,11 +1341,11 @@ func (c *Cluster) waitComponentReady(ctx context.Context, name string, wantReady
 		err     error
 		waitErr error
 		ready   bool
-		exist   bool
+		running bool
 	)
 	logger := log.FromContext(ctx)
 	waitErr = wait.Poll(ctx, func(ctx context.Context) (bool, error) {
-		ready, exist, err = c.inspectComponent(ctx, name)
+		ready, running, _, err = c.inspectComponent(ctx, name)
 		if err != nil {
 			logger.Debug("check component ready",
 				"component", name,
@@ -655,7 +1357,7 @@ func (c *Cluster) waitComponentReady(ctx context.Context, name string, wantReady
 		if wantReady {
 			return ready, nil
 		}
-		return !exist, nil
+		return !running, nil
 	},
 		wait.WithTimeout(timeout),
 		wait.WithImmediate(),
@@ -669,35 +1371,45 @@ func (c *Cluster) waitComponentReady(ctx context.Context, name string, wantReady
 	return nil
 }
 
-func (c *Cluster) inspectComponent(ctx context.Context, name string) (ready bool, exist bool, err error) {
-	out := bytes.NewBuffer(nil)
-	err = c.KubectlInCluster(exec.WithWriteTo(ctx, out), "get", "pod", "--namespace=kube-system", "--output=json", c.getComponentName(name))
+func (c *Cluster) inspectComponent(ctx context.Context, name string) (ready bool, running bool, exist bool, err error) {
+	clientset, err := c.GetClientset(ctx)
 	if err != nil {
-		if strings.Contains(out.String(), "NotFound") {
-			return false, false, nil
-		}
-		return false, false, err
+		return false, false, false, err
 	}
 
-	var pod corev1.Pod
-	err = json.Unmarshal(out.Bytes(), &pod)
+	restConfig, err := clientset.ToRESTConfig()
 	if err != nil {
-		return false, true, err
+		return false, false, false, err
+	}
+
+	typedClient, err := kubernetes.NewForConfig(restConfig)
+	if err != nil {
+		return false, false, false, err
+	}
+
+	pod, err := typedClient.CoreV1().
+		Pods(metav1.NamespaceSystem).
+		Get(ctx, c.getComponentName(name), metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, false, false, nil
+		}
+		return false, false, false, err
 	}
 
 	if pod.Status.Phase != corev1.PodRunning {
-		return false, true, nil
+		return false, false, true, nil
 	}
 	if pod.Status.ContainerStatuses == nil {
-		return false, true, nil
+		return false, true, true, nil
 	}
 	for _, containerStatus := range pod.Status.ContainerStatuses {
 		if !containerStatus.Ready {
-			return false, true, nil
+			return false, true, true, nil
 		}
 	}
 
-	return true, true, nil
+	return true, true, true, nil
 }
 
 func (c *Cluster) getClusterName() string {
@@ -706,12 +1418,7 @@ func (c *Cluster) getClusterName() string {
 
 func (c *Cluster) getComponentName(name string) string {
 	clusterName := c.getClusterName()
-	switch name {
-	case "prometheus":
-	default:
-		name = name + "-" + clusterName
-	}
-	return name
+	return name + "-" + clusterName
 }
 
 func (c *Cluster) logs(ctx context.Context, name string, out io.Writer, follow bool) error {
@@ -857,12 +1564,13 @@ func (c *Cluster) ListImages(ctx context.Context) ([]string, error) {
 		conf.KindNodeImage,
 		conf.KwokControllerImage,
 		conf.PrometheusImage,
+		conf.MetricsServerImage,
 	}, nil
 }
 
 // EtcdctlInCluster implements the ectdctl subcommand
 func (c *Cluster) EtcdctlInCluster(ctx context.Context, args ...string) error {
-	etcdContainerName := c.getComponentName("etcd")
+	etcdContainerName := c.getComponentName(consts.ComponentEtcd)
 
 	args = append(
 		[]string{
@@ -889,8 +1597,7 @@ func (c *Cluster) preDownloadKind(ctx context.Context) (string, error) {
 	_, err = exec.LookPath("kind")
 	if err != nil {
 		// kind does not exist, try to download it
-		kindPath := c.GetBinPath("kind" + conf.BinSuffix)
-		err = c.DownloadWithCache(ctx, conf.CacheDir, conf.KindBinary, kindPath, 0750, conf.QuietPull)
+		kindPath, err := c.EnsureBinary(ctx, "kind", conf.KindBinary)
 		if err != nil {
 			return "", err
 		}
@@ -898,4 +1605,57 @@ func (c *Cluster) preDownloadKind(ctx context.Context) (string, error) {
 	}
 
 	return "kind", nil
+}
+
+// InitCRs initializes the CRs.
+func (c *Cluster) InitCRs(ctx context.Context) error {
+	config, err := c.Config(ctx)
+	if err != nil {
+		return err
+	}
+
+	_, enableMetricsServer := slices.Find(config.Components, func(c internalversion.Component) bool {
+		return c.Name == consts.ComponentMetricsServer
+	})
+	if c.IsDryRun() {
+		if enableMetricsServer {
+			dryrun.PrintMessage("# Set up apiservice for metrics server")
+		}
+
+		return nil
+	}
+
+	buf := bytes.NewBuffer(nil)
+	if enableMetricsServer {
+		apiservice, err := components.BuildMetricsServerAPIService(components.BuildMetricsServerAPIServiceConfig{
+			Port:         4443,
+			ExternalName: "localhost",
+		})
+		if err != nil {
+			return err
+		}
+		_, _ = buf.WriteString(apiservice)
+		_, _ = buf.WriteString("---\n")
+	}
+
+	if buf.Len() == 0 {
+		return nil
+	}
+
+	clientset, err := c.GetClientset(ctx)
+	if err != nil {
+		return err
+	}
+
+	loader, err := snapshot.NewLoader(snapshot.LoadConfig{
+		Clientset: clientset,
+		NoFilers:  true,
+	})
+	if err != nil {
+		return err
+	}
+
+	decoder := yaml.NewDecoder(buf)
+
+	return loader.Load(ctx, decoder)
 }

@@ -23,11 +23,14 @@ import (
 	"sigs.k8s.io/kwok/pkg/consts"
 	"sigs.k8s.io/kwok/pkg/log"
 	"sigs.k8s.io/kwok/pkg/utils/format"
+	"sigs.k8s.io/kwok/pkg/utils/net"
 	"sigs.k8s.io/kwok/pkg/utils/version"
 )
 
 // BuildKubeControllerManagerComponentConfig is the configuration for building a kube-controller-manager component.
 type BuildKubeControllerManagerComponentConfig struct {
+	Runtime                            string
+	ProjectName                        string
 	Binary                             string
 	Image                              string
 	Version                            version.Version
@@ -45,15 +48,11 @@ type BuildKubeControllerManagerComponentConfig struct {
 	NodeMonitorGracePeriodMilliseconds int64
 	Verbosity                          log.Level
 	DisableQPSLimits                   bool
-	ExtraArgs                          []internalversion.ExtraArgs
-	ExtraVolumes                       []internalversion.Volume
-	ExtraEnvs                          []internalversion.Env
 }
 
 // BuildKubeControllerManagerComponent builds a kube-controller-manager component.
 func BuildKubeControllerManagerComponent(conf BuildKubeControllerManagerComponentConfig) (component internalversion.Component, err error) {
 	kubeControllerManagerArgs := []string{}
-	kubeControllerManagerArgs = append(kubeControllerManagerArgs, extraArgsToStrings(conf.ExtraArgs)...)
 
 	if conf.KubeFeatureGates != "" {
 		kubeControllerManagerArgs = append(kubeControllerManagerArgs,
@@ -73,12 +72,11 @@ func BuildKubeControllerManagerComponent(conf BuildKubeControllerManagerComponen
 		)
 	}
 
-	inContainer := conf.Image != ""
 	var volumes []internalversion.Volume
-	volumes = append(volumes, conf.ExtraVolumes...)
 	var ports []internalversion.Port
+	var metric *internalversion.ComponentMetric
 
-	if inContainer {
+	if GetRuntimeMode(conf.Runtime) != RuntimeModeNative {
 		volumes = append(volumes,
 			internalversion.Volume{
 				HostPath:  conf.KubeconfigPath,
@@ -117,25 +115,50 @@ func BuildKubeControllerManagerComponent(conf BuildKubeControllerManagerComponen
 			)
 		}
 
-		if inContainer {
+		if GetRuntimeMode(conf.Runtime) != RuntimeModeNative {
 			kubeControllerManagerArgs = append(kubeControllerManagerArgs,
 				"--bind-address="+conf.BindAddress,
 				"--secure-port=10257",
 			)
-			if conf.Port > 0 {
-				ports = append(
-					ports,
-					internalversion.Port{
-						HostPort: conf.Port,
-						Port:     10257,
-					},
-				)
+			ports = append(
+				ports,
+				internalversion.Port{
+					Name:     "https",
+					HostPort: conf.Port,
+					Port:     10257,
+					Protocol: internalversion.ProtocolTCP,
+				},
+			)
+			metric = &internalversion.ComponentMetric{
+				Scheme:             "https",
+				Host:               conf.ProjectName + "-" + consts.ComponentKubeControllerManager + ":10257",
+				Path:               "/metrics",
+				CertPath:           "/etc/kubernetes/pki/admin.crt",
+				KeyPath:            "/etc/kubernetes/pki/admin.key",
+				InsecureSkipVerify: true,
 			}
 		} else {
 			kubeControllerManagerArgs = append(kubeControllerManagerArgs,
 				"--bind-address="+conf.BindAddress,
 				"--secure-port="+format.String(conf.Port),
 			)
+			ports = append(
+				ports,
+				internalversion.Port{
+					Name:     "https",
+					HostPort: 0,
+					Port:     conf.Port,
+					Protocol: internalversion.ProtocolTCP,
+				},
+			)
+			metric = &internalversion.ComponentMetric{
+				Scheme:             "https",
+				Host:               net.LocalAddress + ":" + format.String(conf.Port),
+				Path:               "/metrics",
+				CertPath:           conf.AdminCertPath,
+				KeyPath:            conf.AdminKeyPath,
+				InsecureSkipVerify: true,
+			}
 		}
 
 		// TODO: Support disable insecure port
@@ -143,25 +166,44 @@ func BuildKubeControllerManagerComponent(conf BuildKubeControllerManagerComponen
 		//		"--port=0",
 		//	)
 	} else {
-		if inContainer {
+		if GetRuntimeMode(conf.Runtime) != RuntimeModeNative {
 			kubeControllerManagerArgs = append(kubeControllerManagerArgs,
 				"--address="+conf.BindAddress,
 				"--port=10252",
 			)
-			if conf.Port > 0 {
-				ports = append(
-					ports,
-					internalversion.Port{
-						HostPort: conf.Port,
-						Port:     10252,
-					},
-				)
+			ports = append(
+				ports,
+				internalversion.Port{
+					Name:     "http",
+					HostPort: conf.Port,
+					Port:     10252,
+					Protocol: internalversion.ProtocolTCP,
+				},
+			)
+			metric = &internalversion.ComponentMetric{
+				Scheme: "http",
+				Host:   conf.ProjectName + "-" + consts.ComponentKubeControllerManager + ":10252",
+				Path:   "/metrics",
 			}
 		} else {
 			kubeControllerManagerArgs = append(kubeControllerManagerArgs,
 				"--address="+conf.BindAddress,
 				"--port="+format.String(conf.Port),
 			)
+			ports = append(
+				ports,
+				internalversion.Port{
+					Name:     "http",
+					HostPort: 0,
+					Port:     conf.Port,
+					Protocol: internalversion.ProtocolTCP,
+				},
+			)
+			metric = &internalversion.ComponentMetric{
+				Scheme: "http",
+				Host:   net.LocalAddress + ":" + format.String(conf.Port),
+				Path:   "/metrics",
+			}
 		}
 
 		kubeControllerManagerArgs = append(kubeControllerManagerArgs,
@@ -170,7 +212,7 @@ func BuildKubeControllerManagerComponent(conf BuildKubeControllerManagerComponen
 	}
 
 	if conf.KubeAuthorization {
-		if inContainer {
+		if GetRuntimeMode(conf.Runtime) != RuntimeModeNative {
 			kubeControllerManagerArgs = append(kubeControllerManagerArgs,
 				"--root-ca-file=/etc/kubernetes/pki/ca.crt",
 				"--service-account-private-key-file=/etc/kubernetes/pki/admin.key",
@@ -195,21 +237,21 @@ func BuildKubeControllerManagerComponent(conf BuildKubeControllerManagerComponen
 	}
 
 	envs := []internalversion.Env{}
-	envs = append(envs, conf.ExtraEnvs...)
 
 	return internalversion.Component{
-		Name:    "kube-controller-manager",
+		Name:    consts.ComponentKubeControllerManager,
 		Version: conf.Version.String(),
 		Links: []string{
-			"kube-apiserver",
+			consts.ComponentKubeApiserver,
 		},
-		Command: []string{"kube-controller-manager"},
+		Command: []string{consts.ComponentKubeControllerManager},
 		Volumes: volumes,
 		Args:    kubeControllerManagerArgs,
 		Ports:   ports,
 		Binary:  conf.Binary,
 		Image:   conf.Image,
 		WorkDir: conf.Workdir,
+		Metric:  metric,
 		Envs:    envs,
 	}, nil
 }

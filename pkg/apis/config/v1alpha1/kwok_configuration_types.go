@@ -18,6 +18,7 @@ package v1alpha1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	tracingv1 "k8s.io/component-base/tracing/api/v1"
 )
 
 const (
@@ -36,6 +37,8 @@ type KwokConfiguration struct {
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 	// Options holds information about the default value.
 	Options KwokConfigurationOptions `json:"options,omitempty"`
+	// Tracing holds tracing configuration.
+	Tracing TracingConfiguration `json:"tracing,omitempty"`
 }
 
 // KwokConfigurationOptions holds information about the options.
@@ -70,27 +73,43 @@ type KwokConfigurationOptions struct {
 	// is the default value for flag --tls-private-key-file
 	TLSPrivateKeyFile string `json:"tlsPrivateKeyFile,omitempty"`
 
+	// ManageSingleNode is the option to manage a single node name.
+	// is the default value for flag --manage-single-node
+	// Note: when `manage-all-nodes` is specified as true or
+	// `manage-nodes-with-label-selector` or `manage-nodes-with-annotation-selector` is specified,
+	// this is a no-op.
+	ManageSingleNode string `json:"manageSingleNode,omitempty"`
+
 	// Default option to manage (i.e., maintain heartbeat/liveness of) all Nodes or not.
 	// is the default value for flag --manage-all-nodes
+	// Note: when `manage-single-node` is specified as true or
+	// `manage-nodes-with-label-selector` or `manage-nodes-with-annotation-selector` is specified,
+	// this is a no-op.
 	// +default=false
 	ManageAllNodes *bool `json:"manageAllNodes,omitempty"`
 
 	// Default annotations specified on Nodes to demand manage.
-	// Note: when `all-node-manage` is specified as true, this is a no-op.
 	// is the default value for flag --manage-nodes-with-annotation-selector
+	// Note: when `all-node-manage` is specified as true or
+	// `manage-single-node` is specified,
+	// this is a no-op.
 	ManageNodesWithAnnotationSelector string `json:"manageNodesWithAnnotationSelector,omitempty"`
 
 	// Default labels specified on Nodes to demand manage.
-	// Note: when `all-node-manage` is specified as true, this is a no-op.
 	// is the default value for flag --manage-nodes-with-label-selector
+	// Note: when `all-node-manage` is specified as true or
+	// `manage-single-node` is specified,
+	// this is a no-op.
 	ManageNodesWithLabelSelector string `json:"manageNodesWithLabelSelector,omitempty"`
 
 	// If a Node/Pod is on a managed Node and has this annotation status will not be modified
 	// is the default value for flag --disregard-status-with-annotation-selector
+	// Deprecated: use Stage API instead
 	DisregardStatusWithAnnotationSelector string `json:"disregardStatusWithAnnotationSelector,omitempty"`
 
 	// If a Node/Pod is on a managed Node and has this label status will not be modified
 	// is the default value for flag --disregard-status-with-label-selector
+	// Deprecated: use Stage API instead
 	DisregardStatusWithLabelSelector string `json:"disregardStatusWithLabelSelector,omitempty"`
 
 	// ServerAddress is server address of the Kwok.
@@ -100,6 +119,7 @@ type KwokConfigurationOptions struct {
 	// Experimental support for getting pod ip from CNI, for CNI-related components, Only works with Linux.
 	// is the default value for flag --experimental-enable-cni
 	// +default=false
+	// Deprecated: It will be removed and will be supported in the form of plugins
 	EnableCNI *bool `json:"experimentalEnableCNI,omitempty"`
 
 	// enableDebuggingHandlers enables server endpoints for log collection
@@ -130,3 +150,6 @@ type KwokConfigurationOptions struct {
 	// +default=4
 	NodeLeaseParallelism uint `json:"nodeLeaseParallelism,omitempty"`
 }
+
+// TracingConfiguration provides versioned configuration for OpenTelemetry tracing clients.
+type TracingConfiguration tracingv1.TracingConfiguration

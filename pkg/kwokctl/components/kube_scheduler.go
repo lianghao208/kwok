@@ -21,11 +21,14 @@ import (
 	"sigs.k8s.io/kwok/pkg/consts"
 	"sigs.k8s.io/kwok/pkg/log"
 	"sigs.k8s.io/kwok/pkg/utils/format"
+	"sigs.k8s.io/kwok/pkg/utils/net"
 	"sigs.k8s.io/kwok/pkg/utils/version"
 )
 
 // BuildKubeSchedulerComponentConfig is the configuration for building a kube-scheduler component.
 type BuildKubeSchedulerComponentConfig struct {
+	Runtime          string
+	ProjectName      string
 	Binary           string
 	Image            string
 	Version          version.Version
@@ -41,15 +44,11 @@ type BuildKubeSchedulerComponentConfig struct {
 	KubeFeatureGates string
 	Verbosity        log.Level
 	DisableQPSLimits bool
-	ExtraArgs        []internalversion.ExtraArgs
-	ExtraVolumes     []internalversion.Volume
-	ExtraEnvs        []internalversion.Env
 }
 
 // BuildKubeSchedulerComponent builds a kube-scheduler component.
 func BuildKubeSchedulerComponent(conf BuildKubeSchedulerComponentConfig) (component internalversion.Component, err error) {
 	kubeSchedulerArgs := []string{}
-	kubeSchedulerArgs = append(kubeSchedulerArgs, extraArgsToStrings(conf.ExtraArgs)...)
 
 	if conf.KubeFeatureGates != "" {
 		kubeSchedulerArgs = append(kubeSchedulerArgs,
@@ -57,12 +56,11 @@ func BuildKubeSchedulerComponent(conf BuildKubeSchedulerComponentConfig) (compon
 		)
 	}
 
-	inContainer := conf.Image != ""
 	var volumes []internalversion.Volume
-	volumes = append(volumes, conf.ExtraVolumes...)
 	var ports []internalversion.Port
+	var metric *internalversion.ComponentMetric
 
-	if inContainer {
+	if GetRuntimeMode(conf.Runtime) != RuntimeModeNative {
 		volumes = append(volumes,
 			internalversion.Volume{
 				HostPath:  conf.KubeconfigPath,
@@ -121,50 +119,94 @@ func BuildKubeSchedulerComponent(conf BuildKubeSchedulerComponentConfig) (compon
 			)
 		}
 
-		if inContainer {
+		if GetRuntimeMode(conf.Runtime) != RuntimeModeNative {
 			kubeSchedulerArgs = append(kubeSchedulerArgs,
 				"--bind-address="+conf.BindAddress,
 				"--secure-port=10259",
 			)
-			if conf.Port != 0 {
-				ports = append(
-					ports,
-					internalversion.Port{
-						HostPort: conf.Port,
-						Port:     10259,
-					},
-				)
+			ports = append(
+				ports,
+				internalversion.Port{
+					Name:     "https",
+					HostPort: conf.Port,
+					Port:     10259,
+					Protocol: internalversion.ProtocolTCP,
+				},
+			)
+			metric = &internalversion.ComponentMetric{
+				Scheme:             "https",
+				Host:               conf.ProjectName + "-" + consts.ComponentKubeScheduler + ":10259",
+				Path:               "/metrics",
+				CertPath:           "/etc/kubernetes/pki/admin.crt",
+				KeyPath:            "/etc/kubernetes/pki/admin.key",
+				InsecureSkipVerify: true,
 			}
 		} else {
 			kubeSchedulerArgs = append(kubeSchedulerArgs,
 				"--bind-address="+conf.BindAddress,
 				"--secure-port="+format.String(conf.Port),
 			)
+			ports = append(
+				ports,
+				internalversion.Port{
+					Name:     "https",
+					HostPort: 0,
+					Port:     conf.Port,
+					Protocol: internalversion.ProtocolTCP,
+				},
+			)
+			metric = &internalversion.ComponentMetric{
+				Scheme:             "https",
+				Host:               net.LocalAddress + ":" + format.String(conf.Port),
+				Path:               "/metrics",
+				CertPath:           conf.AdminCertPath,
+				KeyPath:            conf.AdminKeyPath,
+				InsecureSkipVerify: true,
+			}
 		}
 		// TODO: Support disable insecure port
 		//	kubeSchedulerArgs = append(kubeSchedulerArgs,
 		//		"--port=0",
 		//	)
 	} else {
-		if inContainer {
+		if GetRuntimeMode(conf.Runtime) != RuntimeModeNative {
 			kubeSchedulerArgs = append(kubeSchedulerArgs,
 				"--address="+conf.BindAddress,
 				"--port=10251",
 			)
-			if conf.Port != 0 {
-				ports = append(
-					ports,
-					internalversion.Port{
-						HostPort: conf.Port,
-						Port:     10251,
-					},
-				)
+			ports = append(
+				ports,
+				internalversion.Port{
+					Name:     "http",
+					HostPort: conf.Port,
+					Port:     10251,
+					Protocol: internalversion.ProtocolTCP,
+				},
+			)
+			metric = &internalversion.ComponentMetric{
+				Scheme: "http",
+				Host:   conf.ProjectName + "-" + consts.ComponentKubeScheduler + ":10251",
+				Path:   "/metrics",
 			}
 		} else {
 			kubeSchedulerArgs = append(kubeSchedulerArgs,
 				"--address="+conf.BindAddress,
 				"--port="+format.String(conf.Port),
 			)
+			ports = append(
+				ports,
+				internalversion.Port{
+					Name:     "http",
+					HostPort: 0,
+					Port:     conf.Port,
+					Protocol: internalversion.ProtocolTCP,
+				},
+			)
+			metric = &internalversion.ComponentMetric{
+				Scheme: "http",
+				Host:   net.LocalAddress + ":" + format.String(conf.Port),
+				Path:   "/metrics",
+			}
 		}
 
 		// TODO: Support disable secure port
@@ -185,21 +227,21 @@ func BuildKubeSchedulerComponent(conf BuildKubeSchedulerComponentConfig) (compon
 	}
 
 	envs := []internalversion.Env{}
-	envs = append(envs, conf.ExtraEnvs...)
 
 	return internalversion.Component{
-		Name:    "kube-scheduler",
+		Name:    consts.ComponentKubeScheduler,
 		Version: conf.Version.String(),
 		Links: []string{
-			"kube-apiserver",
+			consts.ComponentKubeApiserver,
 		},
-		Command: []string{"kube-scheduler"},
+		Command: []string{consts.ComponentKubeScheduler},
 		Volumes: volumes,
 		Args:    kubeSchedulerArgs,
 		Binary:  conf.Binary,
 		Image:   conf.Image,
 		Ports:   ports,
 		WorkDir: conf.Workdir,
+		Metric:  metric,
 		Envs:    envs,
 	}, nil
 }

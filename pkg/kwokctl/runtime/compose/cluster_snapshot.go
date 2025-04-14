@@ -20,7 +20,11 @@ import (
 	"context"
 
 	"sigs.k8s.io/kwok/pkg/consts"
+	"sigs.k8s.io/kwok/pkg/kwokctl/etcd"
+	"sigs.k8s.io/kwok/pkg/kwokctl/runtime"
 	"sigs.k8s.io/kwok/pkg/log"
+	"sigs.k8s.io/kwok/pkg/utils/format"
+	"sigs.k8s.io/kwok/pkg/utils/net"
 )
 
 // SnapshotSave save the snapshot of cluster
@@ -70,16 +74,40 @@ func (c *Cluster) SnapshotRestore(ctx context.Context, path string) error {
 	}()
 
 	etcdContainerName := c.Name() + "-etcd"
-	if conf.Runtime != consts.RuntimeTypeNerdctl {
-		// Restart etcd container
-		err = c.StopComponent(ctx, "etcd")
-		if err != nil {
-			logger.Error("Failed to stop etcd", err)
+	if !c.isNerdctl {
+		// Restart etcd and kube-apiserver
+		components := []string{
+			consts.ComponentEtcd,
+			consts.ComponentKubeApiserver,
+		}
+		for _, component := range components {
+			err := c.StopComponent(ctx, component)
+			if err != nil {
+				logger.Error("Failed to stop", err, "component", component)
+			}
 		}
 		defer func() {
-			err = c.StartComponent(ctx, "etcd")
-			if err != nil {
-				logger.Error("Failed to start etcd", err)
+			for _, component := range components {
+				err := c.StartComponent(ctx, component)
+				if err != nil {
+					logger.Error("Failed to start", err, "component", component)
+				}
+			}
+
+			components := []string{
+				consts.ComponentKwokController,
+				consts.ComponentKubeControllerManager,
+				consts.ComponentKubeScheduler,
+			}
+			for _, component := range components {
+				err := c.StopComponent(ctx, component)
+				if err != nil {
+					logger.Error("Failed to stop", err, "component", component)
+				}
+				err = c.StartComponent(ctx, component)
+				if err != nil {
+					logger.Error("Failed to start", err, "component", component)
+				}
 			}
 		}()
 
@@ -93,12 +121,12 @@ func (c *Cluster) SnapshotRestore(ctx context.Context, path string) error {
 		// https://github.com/containerd/nerdctl/issues/1812
 
 		// Stop the kube-apiserver container to avoid data modification by etcd during restore.
-		err = c.StopComponent(ctx, "kube-apiserver")
+		err = c.StopComponent(ctx, consts.ComponentKubeApiserver)
 		if err != nil {
 			logger.Error("Failed to stop kube-apiserver", err)
 		}
 		defer func() {
-			err = c.StartComponent(ctx, "kube-apiserver")
+			err = c.StartComponent(ctx, consts.ComponentKubeApiserver)
 			if err != nil {
 				logger.Error("Failed to start kube-apiserver", err)
 			}
@@ -110,15 +138,42 @@ func (c *Cluster) SnapshotRestore(ctx context.Context, path string) error {
 			return err
 		}
 
-		// Restart etcd container
-		err = c.StopComponent(ctx, "etcd")
-		if err != nil {
-			logger.Error("Failed to stop etcd", err)
+		// Restart etcd and kube-apiserver
+		components := []string{
+			consts.ComponentEtcd,
+		}
+		for _, component := range components {
+			err := c.StopComponent(ctx, component)
+			if err != nil {
+				logger.Error("Failed to stop", err, "component", component)
+			}
 		}
 		defer func() {
-			err = c.StartComponent(ctx, "etcd")
-			if err != nil {
-				logger.Error("Failed to start etcd", err)
+			components := []string{
+				consts.ComponentEtcd,
+				consts.ComponentKubeApiserver,
+			}
+			for _, component := range components {
+				err := c.StartComponent(ctx, component)
+				if err != nil {
+					logger.Error("Failed to start", err, "component", component)
+				}
+			}
+
+			components = []string{
+				consts.ComponentKwokController,
+				consts.ComponentKubeControllerManager,
+				consts.ComponentKubeScheduler,
+			}
+			for _, component := range components {
+				err := c.StopComponent(ctx, component)
+				if err != nil {
+					logger.Error("Failed to stop", err, "component", component)
+				}
+				err = c.StartComponent(ctx, component)
+				if err != nil {
+					logger.Error("Failed to start", err, "component", component)
+				}
 			}
 		}()
 	}
@@ -127,8 +182,8 @@ func (c *Cluster) SnapshotRestore(ctx context.Context, path string) error {
 }
 
 // SnapshotSaveWithYAML save the snapshot of cluster
-func (c *Cluster) SnapshotSaveWithYAML(ctx context.Context, path string, filters []string) error {
-	err := c.Cluster.SnapshotSaveWithYAML(ctx, path, filters)
+func (c *Cluster) SnapshotSaveWithYAML(ctx context.Context, path string, conf runtime.SnapshotSaveWithYAMLConfig) error {
+	err := c.Cluster.SnapshotSaveWithYAML(ctx, path, conf)
 	if err != nil {
 		return err
 	}
@@ -136,22 +191,69 @@ func (c *Cluster) SnapshotSaveWithYAML(ctx context.Context, path string, filters
 }
 
 // SnapshotRestoreWithYAML restore the snapshot of cluster
-func (c *Cluster) SnapshotRestoreWithYAML(ctx context.Context, path string, filters []string) error {
+func (c *Cluster) SnapshotRestoreWithYAML(ctx context.Context, path string, conf runtime.SnapshotRestoreWithYAMLConfig) error {
 	logger := log.FromContext(ctx)
-	err := c.StopComponent(ctx, "kube-controller-manager")
-	if err != nil {
-		logger.Error("Failed to stop kube-controller-manager", err)
+	components := []string{
+		consts.ComponentKubeScheduler,
+		consts.ComponentKubeControllerManager,
+		consts.ComponentKwokController,
+	}
+	for _, component := range components {
+		err := c.StopComponent(ctx, component)
+		if err != nil {
+			logger.Error("Failed to stop", err, "component", component)
+		}
 	}
 	defer func() {
-		err = c.StartComponent(ctx, "kube-controller-manager")
-		if err != nil {
-			logger.Error("Failed to start kube-controller-manager", err)
+		for _, component := range components {
+			err := c.StartComponent(ctx, component)
+			if err != nil {
+				logger.Error("Failed to start", err, "component", component)
+			}
 		}
 	}()
 
-	err = c.Cluster.SnapshotRestoreWithYAML(ctx, path, filters)
+	err := c.Cluster.SnapshotRestoreWithYAML(ctx, path, conf)
 	if err != nil {
 		return err
 	}
 	return nil
+}
+
+// GetEtcdClient returns the etcd client of cluster
+func (c *Cluster) GetEtcdClient(ctx context.Context) (etcd.Client, func(), error) {
+	config, err := c.Config(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	conf := &config.Options
+
+	if conf.EtcdPort == 0 {
+		unused, err := net.GetUnusedPort(ctx, nil)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		cli, err := etcd.NewClient(etcd.ClientConfig{
+			Endpoints: []string{"http://" + net.LocalAddress + ":" + format.String(unused)},
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+
+		cancel, err := c.PortForward(ctx, consts.ComponentEtcd, "http", unused)
+		if err != nil {
+			return nil, nil, err
+		}
+		return cli, cancel, nil
+	}
+
+	cli, err := etcd.NewClient(etcd.ClientConfig{
+		Endpoints: []string{"http://" + net.LocalAddress + ":" + format.String(conf.EtcdPort)},
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return cli, func() {}, nil
 }

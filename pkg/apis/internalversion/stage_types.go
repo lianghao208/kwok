@@ -35,9 +35,13 @@ type StageSpec struct {
 	ResourceRef StageResourceRef
 	// Selector specifies the stags will be applied to the selected resource.
 	Selector *StageSelector
-	// Weight means the current stage, in case of multiple stages,
+	// Weight means when multiple stages share the same ResourceRef and Selector,
 	// a random stage will be matched as the next stage based on the weight.
 	Weight int
+	// WeightFrom means is the expression used to get the value.
+	// If it is a number type, convert to int.
+	// If it is a string type, the value get will be parsed by strconv.ParseInt.
+	WeightFrom *ExpressionFromSource
 	// Delay means there is a delay in this stage.
 	Delay *StageDelay
 	// Next indicates that this stage will be moved to.
@@ -81,8 +85,43 @@ type StageNext struct {
 	Finalizers *StageFinalizers
 	// Delete means that the resource will be deleted if true.
 	Delete bool
-	// StatusTemplate indicates the template for modifying the status of the resource in the next.
-	StatusTemplate string
+	// Patches means that the resource will be patched.
+	Patches []StagePatch
+}
+
+// StagePatch describes the patch for the resource.
+type StagePatch struct {
+	// Subresource indicates the name of the subresource that will be patched.
+	Subresource string
+	// Root indicates the root of the template calculated by the patch.
+	Root string
+	// Template indicates the template for modifying the resource in the next.
+	Template string
+	// Type indicates the type of the patch.
+	Type *StagePatchType
+	// Impersonation indicates the impersonating configuration for client when patching status.
+	// In most cases this will be empty, in which case the default client service account will be used.
+	// When this is not empty, a corresponding rbac change is required to grant `impersonate` privilege.
+	// The support for this field is not available in Pod and Node resources.
+	Impersonation *ImpersonationConfig
+}
+
+// StagePatchType is the type of the patch.
+type StagePatchType string
+
+const (
+	// StagePatchTypeJSONPatch is the JSON patch type.
+	StagePatchTypeJSONPatch StagePatchType = "json"
+	// StagePatchTypeMergePatch is the merge patch type.
+	StagePatchTypeMergePatch StagePatchType = "merge"
+	// StagePatchTypeStrategicMergePatch is the strategic merge patch type.
+	StagePatchTypeStrategicMergePatch StagePatchType = "strategic"
+)
+
+// ImpersonationConfig describes the configuration for impersonating clients
+type ImpersonationConfig struct {
+	// Username the target username for the client to impersonate
+	Username string
 }
 
 // StageFinalizers describes the modifications in the finalizers of a resource.

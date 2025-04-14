@@ -18,38 +18,39 @@ package components
 
 import (
 	"sigs.k8s.io/kwok/pkg/apis/internalversion"
+	"sigs.k8s.io/kwok/pkg/consts"
 	"sigs.k8s.io/kwok/pkg/log"
 	"sigs.k8s.io/kwok/pkg/utils/format"
+	"sigs.k8s.io/kwok/pkg/utils/net"
 	"sigs.k8s.io/kwok/pkg/utils/version"
 )
 
 // BuildPrometheusComponentConfig is the configuration for building a prometheus component.
 type BuildPrometheusComponentConfig struct {
-	Binary        string
-	Image         string
-	Version       version.Version
-	Workdir       string
-	BindAddress   string
-	Port          uint32
-	ConfigPath    string
-	AdminCertPath string
-	AdminKeyPath  string
-	Verbosity     log.Level
-	ExtraArgs     []internalversion.ExtraArgs
-	ExtraVolumes  []internalversion.Volume
-	ExtraEnvs     []internalversion.Env
+	Runtime                      string
+	Binary                       string
+	Image                        string
+	Version                      version.Version
+	Workdir                      string
+	BindAddress                  string
+	Port                         uint32
+	ConfigPath                   string
+	AdminCertPath                string
+	AdminKeyPath                 string
+	Verbosity                    log.Level
+	DisableKubeControllerManager bool
+	DisableKubeScheduler         bool
 }
 
 // BuildPrometheusComponent builds a prometheus component.
 func BuildPrometheusComponent(conf BuildPrometheusComponentConfig) (component internalversion.Component, err error) {
 	prometheusArgs := []string{}
-	prometheusArgs = append(prometheusArgs, extraArgsToStrings(conf.ExtraArgs)...)
 
-	inContainer := conf.Image != ""
 	var volumes []internalversion.Volume
-	volumes = append(volumes, conf.ExtraVolumes...)
 	var ports []internalversion.Port
-	if inContainer {
+	var metric *internalversion.ComponentMetric
+
+	if GetRuntimeMode(conf.Runtime) != RuntimeModeNative {
 		volumes = append(volumes,
 			internalversion.Volume{
 				HostPath:  conf.ConfigPath,
@@ -67,21 +68,39 @@ func BuildPrometheusComponent(conf BuildPrometheusComponentConfig) (component in
 				ReadOnly:  true,
 			},
 		)
-		ports = []internalversion.Port{
-			{
+		ports = append(
+			ports,
+			internalversion.Port{
+				Name:     "http",
 				HostPort: conf.Port,
 				Port:     9090,
+				Protocol: internalversion.ProtocolTCP,
 			},
-		}
+		)
 		prometheusArgs = append(prometheusArgs,
 			"--config.file=/etc/prometheus/prometheus.yaml",
 			"--web.listen-address="+conf.BindAddress+":9090",
 		)
 	} else {
+		ports = append(
+			ports,
+			internalversion.Port{
+				Name:     "http",
+				HostPort: 0,
+				Port:     conf.Port,
+				Protocol: internalversion.ProtocolTCP,
+			},
+		)
 		prometheusArgs = append(prometheusArgs,
 			"--config.file="+conf.ConfigPath,
 			"--web.listen-address="+conf.BindAddress+":"+format.String(conf.Port),
 		)
+	}
+
+	metric = &internalversion.ComponentMetric{
+		Scheme: "http",
+		Host:   net.LocalAddress + ":" + format.String(conf.Port),
+		Path:   "/metrics",
 	}
 
 	if conf.Verbosity != log.LevelInfo {
@@ -89,25 +108,31 @@ func BuildPrometheusComponent(conf BuildPrometheusComponentConfig) (component in
 	}
 
 	envs := []internalversion.Env{}
-	envs = append(envs, conf.ExtraEnvs...)
+
+	links := []string{
+		consts.ComponentEtcd,
+		consts.ComponentKubeApiserver,
+		consts.ComponentKwokController,
+	}
+	if !conf.DisableKubeControllerManager {
+		links = append(links, consts.ComponentKubeControllerManager)
+	}
+	if !conf.DisableKubeScheduler {
+		links = append(links, consts.ComponentKubeScheduler)
+	}
 
 	return internalversion.Component{
-		Name:    "prometheus",
+		Name:    consts.ComponentPrometheus,
 		Version: conf.Version.String(),
-		Links: []string{
-			"etcd",
-			"kube-apiserver",
-			"kube-controller-manager",
-			"kube-scheduler",
-			"kwok-controller",
-		},
-		Command: []string{"prometheus"},
+		Links:   links,
+		Command: []string{consts.ComponentPrometheus},
 		Ports:   ports,
 		Volumes: volumes,
 		Args:    prometheusArgs,
 		Binary:  conf.Binary,
 		Image:   conf.Image,
 		WorkDir: conf.Workdir,
+		Metric:  metric,
 		Envs:    envs,
 	}, nil
 }

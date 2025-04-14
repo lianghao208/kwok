@@ -29,6 +29,7 @@ const (
 // +genclient
 // +kubebuilder:subresource:status
 // +kubebuilder:rbac:groups=kwok.x-k8s.io,resources=attaches,verbs=create;delete;get;list;patch;update;watch
+// +kubebuilder:rbac:groups=kwok.x-k8s.io,resources=attaches/status,verbs=update;patch
 
 // Attach provides attach configuration for a single pod.
 type Attach struct {
@@ -63,11 +64,9 @@ type AttachSpec struct {
 // AttachConfig holds information how to attach.
 type AttachConfig struct {
 	// Containers is list of container names.
-	Containers []string `json:"containers"`
+	Containers []string `json:"containers,omitempty"`
 	// LogsFile is the file from which the attach starts
-	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:MinLength=1
-	LogsFile string `json:"logsFile"`
+	LogsFile *string `json:"logsFile,omitempty"`
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object

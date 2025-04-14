@@ -7,6 +7,18 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - events
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - ""
+  resources:
   - nodes
   verbs:
   - get
@@ -16,6 +28,7 @@ rules:
   - ""
   resources:
   - nodes/status
+  - pods/status
   verbs:
   - patch
   - update
@@ -31,13 +44,6 @@ rules:
   - update
   - watch
 - apiGroups:
-  - ""
-  resources:
-  - pods/status
-  verbs:
-  - patch
-  - update
-- apiGroups:
   - coordination.k8s.io
   resources:
   - leases
@@ -52,113 +58,16 @@ rules:
   - kwok.x-k8s.io
   resources:
   - attaches
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - kwok.x-k8s.io
-  resources:
   - clusterattaches
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - kwok.x-k8s.io
-  resources:
   - clusterexecs
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - kwok.x-k8s.io
-  resources:
   - clusterlogs
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - kwok.x-k8s.io
-  resources:
   - clusterportforwards
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - kwok.x-k8s.io
-  resources:
+  - clusterresourceusages
   - execs
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - kwok.x-k8s.io
-  resources:
   - logs
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - kwok.x-k8s.io
-  resources:
   - metrics
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - kwok.x-k8s.io
-  resources:
   - portforwards
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - kwok.x-k8s.io
-  resources:
+  - resourceusages
   - stages
   verbs:
   - create
@@ -168,3 +77,21 @@ rules:
   - patch
   - update
   - watch
+- apiGroups:
+  - kwok.x-k8s.io
+  resources:
+  - attaches/status
+  - clusterattaches/status
+  - clusterexecs/status
+  - clusterlogs/status
+  - clusterportforwards/status
+  - clusterresourceusages/status
+  - execs/status
+  - logs/status
+  - metrics/status
+  - portforwards/status
+  - resourceusages/status
+  - stages/status
+  verbs:
+  - patch
+  - update

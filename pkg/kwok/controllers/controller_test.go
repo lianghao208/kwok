@@ -28,9 +28,13 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
 
+	nodefast "sigs.k8s.io/kwok/kustomize/stage/node/fast"
+	podfast "sigs.k8s.io/kwok/kustomize/stage/pod/fast"
+	"sigs.k8s.io/kwok/pkg/apis/internalversion"
+	"sigs.k8s.io/kwok/pkg/config"
 	"sigs.k8s.io/kwok/pkg/log"
+	"sigs.k8s.io/kwok/pkg/utils/slices"
 	"sigs.k8s.io/kwok/pkg/utils/wait"
-	"sigs.k8s.io/kwok/stages"
 )
 
 func TestController(t *testing.T) {
@@ -67,10 +71,19 @@ func TestController(t *testing.T) {
 		},
 	}
 
-	nodeStages, _ := NewStagesFromYaml([]byte(stages.DefaultNodeStages))
-	nodeHeartbeatStages, _ := NewStagesFromYaml([]byte(stages.DefaultNodeHeartbeatStages))
-	nodeStages = append(nodeStages, nodeHeartbeatStages...)
-	podStages, _ := NewStagesFromYaml([]byte(stages.DefaultPodStages))
+	nodeInit, _ := config.UnmarshalWithType[*internalversion.Stage](nodefast.DefaultNodeInit)
+	nodeStages := []*internalversion.Stage{nodeInit}
+	podStages, _ := slices.MapWithError([]string{
+		podfast.DefaultPodReady,
+		podfast.DefaultPodComplete,
+		podfast.DefaultPodDelete,
+	}, func(s string) (*internalversion.Stage, error) {
+		stage, err := config.UnmarshalWithType[*internalversion.Stage](s)
+		if err != nil {
+			return nil, err
+		}
+		return stage, nil
+	})
 
 	tests := []struct {
 		name          string
@@ -81,10 +94,12 @@ func TestController(t *testing.T) {
 		{
 			name: "node controller test: manage all nodes",
 			conf: Config{
-				TypedClient:              fake.NewSimpleClientset(nodes...),
-				ManageAllNodes:           true,
-				NodeStages:               nodeStages,
-				PodStages:                podStages,
+				TypedClient:    fake.NewSimpleClientset(nodes...),
+				ManageAllNodes: true,
+				LocalStages: map[internalversion.StageResourceRef][]*internalversion.Stage{
+					podRef:  podStages,
+					nodeRef: nodeStages,
+				},
 				CIDR:                     "10.0.0.1/24",
 				NodePlayStageParallelism: 1,
 				PodPlayStageParallelism:  1,
@@ -101,11 +116,13 @@ func TestController(t *testing.T) {
 			conf: Config{
 				TypedClient:                  fake.NewSimpleClientset(nodes...),
 				ManageNodesWithLabelSelector: "manage-by-kwok",
-				NodeStages:                   nodeStages,
-				PodStages:                    podStages,
-				CIDR:                         "10.0.0.1/24",
-				NodePlayStageParallelism:     1,
-				PodPlayStageParallelism:      1,
+				LocalStages: map[internalversion.StageResourceRef][]*internalversion.Stage{
+					podRef:  podStages,
+					nodeRef: nodeStages,
+				},
+				CIDR:                     "10.0.0.1/24",
+				NodePlayStageParallelism: 1,
+				PodPlayStageParallelism:  1,
 			},
 			wantNodePhase: map[string]corev1.NodePhase{
 				"node-0": corev1.NodeRunning,
@@ -119,11 +136,13 @@ func TestController(t *testing.T) {
 			conf: Config{
 				TypedClient:                       fake.NewSimpleClientset(nodes...),
 				ManageNodesWithAnnotationSelector: "manage-by-kwok=true",
-				NodeStages:                        nodeStages,
-				PodStages:                         podStages,
-				CIDR:                              "10.0.0.1/24",
-				NodePlayStageParallelism:          1,
-				PodPlayStageParallelism:           1,
+				LocalStages: map[internalversion.StageResourceRef][]*internalversion.Stage{
+					podRef:  podStages,
+					nodeRef: nodeStages,
+				},
+				CIDR:                     "10.0.0.1/24",
+				NodePlayStageParallelism: 1,
+				PodPlayStageParallelism:  1,
 			},
 			wantNodePhase: map[string]corev1.NodePhase{
 				"node-0": corev1.NodePending,
@@ -155,7 +174,7 @@ func TestController(t *testing.T) {
 
 			// wait for nodes to be right phase indicated by `tt.wantNodePhase`
 			err = wait.Poll(ctx, func(ctx context.Context) (done bool, err error) {
-				list, err := ctr.typedClient.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+				list, err := ctr.conf.TypedClient.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
 				if err != nil {
 					return false, fmt.Errorf("failed to list nodes, err: %w", err)
 				}

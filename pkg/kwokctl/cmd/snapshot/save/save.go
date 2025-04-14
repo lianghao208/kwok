@@ -76,7 +76,7 @@ func runE(ctx context.Context, flags *flagpole) error {
 	rt, err := runtime.DefaultRegistry.Load(ctx, name, workdir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			logger.Warn("Cluster is not exists")
+			logger.Warn("Cluster does not exist")
 		}
 		return err
 	}
@@ -88,7 +88,9 @@ func runE(ctx context.Context, flags *flagpole) error {
 			return err
 		}
 	case "k8s":
-		err = rt.SnapshotSaveWithYAML(ctx, flags.Path, flags.Filters)
+		err = rt.SnapshotSaveWithYAML(ctx, flags.Path, runtime.SnapshotSaveWithYAMLConfig{
+			Filters: flags.Filters,
+		})
 		if err != nil {
 			return err
 		}
